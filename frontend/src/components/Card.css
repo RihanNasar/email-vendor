@@ -1,0 +1,102 @@
+/* ============================================
+   CARD COMPONENT - Enhanced with Poppins Font
+   ============================================ */
+
+.card {
+  background: linear-gradient(
+      135deg,
+      rgba(147, 51, 234, 0.05) 0%,
+      rgba(147, 51, 234, 0.02) 100%
+    ),
+    hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 1rem;
+  padding: 1.5rem;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2), 0 0 1px rgba(147, 51, 234, 0.1);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+  backdrop-filter: blur(10px);
+  font-family: "Poppins", sans-serif;
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    hsl(var(--primary)) 50%,
+    transparent 100%
+  );
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.card:hover::before {
+  opacity: 1;
+}
+
+.card-hover {
+  cursor: pointer;
+}
+
+.card-hover:hover {
+  transform: translateY(-4px) scale(1.01);
+  box-shadow: 0 12px 40px rgba(147, 51, 234, 0.25),
+    0 0 20px rgba(147, 51, 234, 0.1);
+  border-color: hsl(var(--primary) / 0.4);
+}
+
+.card-hover:active {
+  transform: translateY(-2px) scale(1.005);
+}
+
+/* Card variants */
+.card-stat {
+  padding: 1.5rem;
+}
+
+.card-stat-icon {
+  font-size: 32px;
+  margin-bottom: 1rem;
+}
+
+.card-stat-label {
+  font-size: 0.75rem;
+  color: hsl(var(--muted-foreground));
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  font-family: "Poppins", sans-serif;
+}
+
+.card-stat-value {
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: hsl(var(--foreground));
+  line-height: 1;
+  margin-bottom: 0.5rem;
+  font-family: "Poppins", sans-serif;
+}
+
+.card-stat-meta {
+  font-size: 0.875rem;
+  color: hsl(var(--muted-foreground));
+  font-family: "Poppins", sans-serif;
+}
+
+@media (max-width: 767px) {
+  .card {
+    padding: 1.25rem;
+  }
+
+  .card-stat-value {
+    font-size: 2rem;
+  }
+}

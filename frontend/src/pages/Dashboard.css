@@ -1,0 +1,115 @@
+/* ============================================
+   DASHBOARD PAGE
+   ============================================ */
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-6);
+  margin-bottom: var(--space-10);
+}
+
+.dashboard-section {
+  margin-bottom: var(--space-10);
+}
+
+.dashboard-section h2 {
+  font-size: var(--text-h2);
+  font-weight: 600;
+  color: var(--color-black);
+  margin-bottom: var(--space-6);
+}
+
+/* Activity List */
+.activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border-radius: var(--border-radius-sm);
+  transition: background var(--transition-base);
+}
+
+.activity-item:hover {
+  background: var(--color-gray-100);
+}
+
+.activity-icon {
+  font-size: 24px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.activity-content {
+  flex: 1;
+}
+
+.activity-title {
+  font-size: var(--text-body);
+  font-weight: 500;
+  color: var(--color-gray-900);
+  margin-bottom: var(--space-1);
+}
+
+.activity-time {
+  font-size: var(--text-body-sm);
+  color: var(--color-gray-600);
+}
+
+/* Dashboard Footer */
+.dashboard-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-6);
+  background: var(--color-gray-100);
+  border-radius: var(--border-radius-lg);
+  margin-top: var(--space-10);
+}
+
+.system-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-body);
+  font-weight: 500;
+  color: var(--color-gray-900);
+}
+
+.status-indicator {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.status-online {
+  background: var(--color-status-completed);
+}
+
+.last-update {
+  font-size: var(--text-body-sm);
+  color: var(--color-gray-600);
+}
+
+@media (max-width: 767px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+
+  .dashboard-footer {
+    flex-direction: column;
+    gap: var(--space-3);
+    text-align: center;
+  }
+}

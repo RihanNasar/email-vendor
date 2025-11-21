@@ -1,0 +1,83 @@
+/* ============================================
+   BUTTON COMPONENT
+   ============================================ */
+
+.button {
+  font-family: "Poppins", sans-serif;
+  cursor: pointer;
+  border: none;
+  border-radius: 0.75rem;
+  font-weight: 600;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  position: relative;
+  overflow: hidden;
+  letter-spacing: -0.01em;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Primary Button */
+.button-primary {
+  padding: 0.75rem 2rem;
+  background: linear-gradient(
+    135deg,
+    hsl(var(--primary)) 0%,
+    hsl(var(--accent)) 100%
+  );
+  color: hsl(var(--primary-foreground));
+  font-size: 0.9375rem;
+  box-shadow: 0 2px 8px rgba(147, 51, 234, 0.3);
+}
+
+.button-primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(147, 51, 234, 0.4);
+}
+
+.button-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+/* Secondary Button */
+.button-secondary {
+  padding: 14px 32px;
+  background: var(--color-white);
+  color: var(--color-black);
+  border: 1px solid var(--color-gray-200);
+  font-size: var(--text-body);
+}
+
+.button-secondary:hover:not(:disabled) {
+  background: var(--color-gray-100);
+  border-color: var(--color-gray-300);
+}
+
+/* Ghost Button */
+.button-ghost {
+  padding: 14px 32px;
+  background: transparent;
+  color: var(--color-black);
+  font-size: var(--text-body);
+}
+
+.button-ghost:hover:not(:disabled) {
+  background: var(--color-gray-100);
+}
+
+/* Sizes */
+.button-sm {
+  padding: 8px 16px;
+  font-size: var(--text-body-sm);
+}
+
+.button-lg {
+  padding: 16px 40px;
+  font-size: var(--text-body-lg);
+}
