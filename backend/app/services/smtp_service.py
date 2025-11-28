@@ -4,7 +4,7 @@ import email
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import parsedate_to_datetime, make_msgid
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 from datetime import datetime
 import re
 
@@ -26,10 +26,7 @@ class SMTPService:
         self.smtp_connection = None
     
     def connect_imap(self) -> bool:
-        """
-        Connect to IMAP server to read emails
-        Returns True if connection is successful
-        """
+        """Connect to IMAP server to read emails"""
         try:
             if self.use_ssl:
                 self.imap_connection = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
@@ -44,13 +41,8 @@ class SMTPService:
             return False
     
     def connect_smtp(self) -> bool:
-        """
-        Connect to SMTP server to send emails
-        Returns True if connection is successful
-        """
+        """Connect to SMTP server to send emails"""
         try:
-            # For Gmail SMTP on port 587, use STARTTLS
-            # For port 465, use SMTP_SSL
             if self.smtp_port == 465:
                 self.smtp_connection = smtplib.SMTP_SSL(self.smtp_server, self.smtp_port)
             else:
@@ -99,18 +91,13 @@ class SMTPService:
                 return []
         
         try:
-            # Select inbox
             self.imap_connection.select(folder)
-            
-            # Search for unread messages
             status, messages = self.imap_connection.search(None, 'UNSEEN')
             
             if status != 'OK':
                 return []
             
             message_ids = messages[0].split()
-            
-            # Limit results
             message_ids = message_ids[-max_results:] if len(message_ids) > max_results else message_ids
             
             result = []
@@ -121,10 +108,7 @@ class SMTPService:
                 if status != 'OK':
                     continue
                 
-                # Parse email
                 email_message = email.message_from_bytes(msg_data[0][1])
-                
-                # Extract message details
                 message_dict = self._parse_email_message(email_message, msg_id.decode())
                 result.append(message_dict)
             
@@ -136,15 +120,110 @@ class SMTPService:
         finally:
             self.disconnect_imap()
     
+    def _extract_forwarded_message_ids(self, body: str) -> Set[str]:
+        """
+        Extract message IDs from forwarded email content.
+        Looks for Message-ID patterns in the email body.
+        """
+        message_ids = set()
+        
+        # Pattern to match email Message-IDs in forwarded content
+        # Message-IDs typically look like: <some-unique-id@domain.com>
+        patterns = [
+            r'<[a-zA-Z0-9\-_.]+@[a-zA-Z0-9\-_.]+>',  # Standard format
+            r'Message-ID:\s*(<[^>]+>)',  # Explicit Message-ID header
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, body, re.IGNORECASE)
+            for match in matches:
+                # Clean up the match
+                msg_id = match.strip('<>') if not match.startswith('<') else match
+                if '@' in msg_id and len(msg_id) > 10:  # Basic validation
+                    message_ids.add(msg_id if msg_id.startswith('<') else f'<{msg_id}>')
+        
+        return message_ids
+    
+    def _is_shipping_related(self, subject: str, body: str) -> bool:
+        """
+        Determine if email content is shipping/logistics related
+        by analyzing keywords and patterns.
+        """
+        # Combine subject and body for analysis
+        content = f"{subject} {body}".lower()
+        
+        # Shipping-related keywords
+        shipping_keywords = [
+            'shipment', 'shipping', 'freight', 'cargo', 'delivery',
+            'pickup', 'transport', 'logistics', 'container', 'package',
+            'sender', 'recipient', 'tracking', 'courier', 'dispatch',
+            'quotation', 'rate', 'customs clearance', 'door to door',
+            'reefer', 'temperature controlled', 'cntr', 'fcl', 'lcl',
+            'air freight', 'sea freight', 'warehouse', 'forwarding',
+            'bill of lading', 'awb', 'consignment', 'pallet'
+        ]
+        
+        # Check if content contains shipping keywords
+        matches = sum(1 for keyword in shipping_keywords if keyword in content)
+        
+        # If 2 or more shipping keywords found, consider it shipping-related
+        if matches >= 2:
+            print(f"[SHIPPING DETECTION] Found {matches} shipping keywords in content", flush=True)
+            return True
+        
+        return False
+    
+    def _extract_thread_id(self, email_message, body: str) -> str:
+        """
+        Extract thread ID from email headers and body content.
+        For forwarded emails, also extracts original message IDs from body.
+        """
+        message_id = email_message.get('Message-ID', '').strip()
+        in_reply_to = email_message.get('In-Reply-To', '').strip()
+        references = email_message.get('References', '').strip()
+        subject = email_message.get('Subject', '').lower()
+        
+        # Check if this is a forwarded email
+        is_forwarded = subject.startswith('fwd:') or subject.startswith('fw:')
+        
+        print(f"[THREAD DETECTION] Is Forwarded: {is_forwarded}", flush=True)
+        
+        # For forwarded emails, try to extract original message IDs from body
+        if is_forwarded:
+            forwarded_ids = self._extract_forwarded_message_ids(body)
+            if forwarded_ids:
+                # Use the first extracted ID as the thread root
+                thread_id = list(forwarded_ids)[0]
+                print(f"[THREAD DETECTION] Extracted forwarded thread_id from body: {thread_id}", flush=True)
+                print(f"[THREAD DETECTION] All forwarded IDs found: {forwarded_ids}", flush=True)
+                return thread_id
+        
+        # Standard threading logic
+        if references:
+            ref_list = references.strip().split()
+            if ref_list:
+                thread_id = ref_list[0].strip()
+                print(f"[THREAD DETECTION] Using first Reference as thread_id: {thread_id}", flush=True)
+                return thread_id
+        
+        if in_reply_to:
+            thread_id = in_reply_to.strip()
+            print(f"[THREAD DETECTION] Using In-Reply-To as thread_id: {thread_id}", flush=True)
+            return thread_id
+        
+        # New thread
+        thread_id = message_id
+        print(f"[THREAD DETECTION] New thread, using Message-ID as thread_id: {thread_id}", flush=True)
+        return thread_id
+    
     def _parse_email_message(self, email_message, message_id: str) -> Dict:
-        """Parse email message to standard format"""
+        """Parse email message to standard format with enhanced thread detection"""
         
         # Get sender info
         sender = email_message.get('From', '')
         sender_name = ''
         sender_email = sender
         
-        # Extract name and email from "Name <email@example.com>" format
         match = re.match(r'(.+?)\s*<(.+?)>', sender)
         if match:
             sender_name = match.group(1).strip('"')
@@ -163,8 +242,22 @@ class SMTPService:
         # Get body
         body = self._get_email_body(email_message)
         
-        # Get thread ID (use Message-ID header)
-        thread_id = email_message.get('Message-ID', message_id)
+        # Extract thread ID with body content analysis for forwarded emails
+        thread_id = self._extract_thread_id(email_message, body)
+        
+        # Extract all related message IDs for tracking
+        related_message_ids = self._extract_forwarded_message_ids(body)
+        
+        # Determine if this is shipping-related based on content
+        is_shipping_related = self._is_shipping_related(subject, body)
+        
+        print(f"[EMAIL PARSE] Subject: {subject}", flush=True)
+        print(f"[EMAIL PARSE] Message-ID: {email_message.get('Message-ID', '')}", flush=True)
+        print(f"[EMAIL PARSE] Thread-ID: {thread_id}", flush=True)
+        print(f"[EMAIL PARSE] In-Reply-To: {email_message.get('In-Reply-To', '')}", flush=True)
+        print(f"[EMAIL PARSE] References: {email_message.get('References', '')}", flush=True)
+        print(f"[EMAIL PARSE] Related Message IDs: {related_message_ids}", flush=True)
+        print(f"[EMAIL PARSE] Is Shipping Related: {is_shipping_related}", flush=True)
         
         return {
             'id': message_id,
@@ -174,7 +267,11 @@ class SMTPService:
             'subject': subject,
             'body': body,
             'internal_date': received_at,
-            'raw': None  # SMTP/IMAP doesn't provide raw format like Gmail API
+            'raw': None,
+            'related_message_ids': list(related_message_ids),  # All message IDs found in content
+            'is_shipping_related': is_shipping_related,  # Content-based shipping detection
+            'is_forwarded': subject.lower().startswith(('fwd:', 'fw:')),
+            'is_reply': subject.lower().startswith('re:')
         }
     
     def _get_email_body(self, email_message) -> str:
@@ -182,7 +279,6 @@ class SMTPService:
         body = ''
         
         if email_message.is_multipart():
-            # Get the first text/plain or text/html part
             for part in email_message.walk():
                 content_type = part.get_content_type()
                 content_disposition = str(part.get('Content-Disposition', ''))
@@ -209,20 +305,7 @@ class SMTPService:
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None
     ) -> bool:
-        """
-        Send an email via SMTP
-        
-        Args:
-            to_email: Recipient email address
-            subject: Email subject
-            body: Email body
-            html: Whether body is HTML (default: False)
-            cc: CC recipients
-            bcc: BCC recipients
-            
-        Returns:
-            True if email sent successfully
-        """
+        """Send an email via SMTP"""
         if not self.smtp_connection:
             if not self.connect_smtp():
                 return False
@@ -238,7 +321,6 @@ class SMTPService:
             if bcc:
                 message['Bcc'] = ', '.join(bcc)
             
-            # Attach body
             if html:
                 part = MIMEText(body, 'html')
             else:
@@ -246,7 +328,6 @@ class SMTPService:
             
             message.attach(part)
             
-            # Send email
             recipients = [to_email]
             if cc:
                 recipients.extend(cc)
@@ -272,26 +353,12 @@ class SMTPService:
         in_reply_to: Optional[str] = None,
         references: Optional[str] = None
     ) -> Optional[str]:
-        """
-        Send a reply email
-        
-        Args:
-            to_email: Recipient email address
-            subject: Email subject (will be prefixed with "Re: " if not already)
-            body: Email body
-            html: Whether body is HTML
-            in_reply_to: Message-ID this is replying to
-            references: References header for threading
-            
-        Returns:
-            Message ID if successful, None otherwise
-        """
+        """Send a reply email"""
         if not self.smtp_connection:
             if not self.connect_smtp():
                 return None
         
         try:
-            # Ensure subject has "Re: " prefix
             if not subject.startswith('Re: '):
                 subject = f'Re: {subject}'
             
@@ -300,11 +367,9 @@ class SMTPService:
             message['To'] = to_email
             message['Subject'] = subject
             
-            # Generate unique Message-ID
             message_id = make_msgid(domain=self.email_address.split('@')[1])
             message['Message-ID'] = message_id
             
-            # Add threading headers
             if in_reply_to:
                 message['In-Reply-To'] = in_reply_to
             if references:
@@ -312,7 +377,6 @@ class SMTPService:
             elif in_reply_to:
                 message['References'] = in_reply_to
             
-            # Attach body
             if html:
                 part = MIMEText(body, 'html')
             else:
@@ -320,10 +384,8 @@ class SMTPService:
             
             message.attach(part)
             
-            # Send email
             self.smtp_connection.sendmail(self.email_address, [to_email], message.as_string())
             
-            # Return the Message-ID
             return message_id
             
         except Exception as e:
@@ -333,16 +395,7 @@ class SMTPService:
             self.disconnect_smtp()
     
     def mark_as_read(self, message_id: str, folder: str = "INBOX") -> bool:
-        """
-        Mark a message as read
-        
-        Args:
-            message_id: Message ID to mark as read
-            folder: Email folder (default: INBOX)
-            
-        Returns:
-            True if successful
-        """
+        """Mark a message as read"""
         if not self.imap_connection:
             if not self.connect_imap():
                 return False
@@ -359,10 +412,7 @@ class SMTPService:
             self.disconnect_imap()
     
     def authenticate(self) -> bool:
-        """
-        Authenticate with email server
-        Returns True if authentication is successful
-        """
+        """Authenticate with email server"""
         return self.connect_imap() and self.connect_smtp()
 
 

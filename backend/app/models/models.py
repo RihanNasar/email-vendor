@@ -36,6 +36,10 @@ class Email(Base):
     message_id = Column(String(255), unique=True, index=True, nullable=False)
     thread_id = Column(String(255), index=True)
     
+    # NEW FIELDS FOR EMAIL METADATA
+    is_forwarded = Column(Boolean, default=False)  # Whether email is forwarded
+    is_reply = Column(Boolean, default=False)      # Whether email is a reply
+    
     # Email content
     sender_email = Column(String(255), nullable=False, index=True)
     sender_name = Column(String(255))
@@ -102,9 +106,10 @@ class ShipmentSession(Base):
     missing_fields = Column(JSON, default=list)  # List of missing required fields
     extracted_data = Column(JSON, default=dict)  # All extracted data
 
-    # Email thread and subject for matching replies
-    thread_id = Column(String(255), nullable=True, index=True)
-    subject = Column(Text, nullable=True)
+    # NEW FIELDS FOR THREAD TRACKING
+    # Updated to String(500) to support indexing as requested
+    thread_id = Column(String(500), nullable=True, index=True)
+    subject = Column(String(500), nullable=True, index=True)
     
     # Vendor tracking
     vendor_notified_at = Column(DateTime, nullable=True)
@@ -191,4 +196,3 @@ class Vendor(Base):
     # Metadata
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-

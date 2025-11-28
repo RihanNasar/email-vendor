@@ -22,6 +22,7 @@ const Vendors: React.FC = () => {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showSessionsModal, setShowSessionsModal] = useState(false);
   const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
+
   const [formData, setFormData] = useState({
     name: "",
     email: "",
@@ -35,6 +36,7 @@ const Vendors: React.FC = () => {
       | "warehouse",
     active: true,
   });
+
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -62,8 +64,7 @@ const Vendors: React.FC = () => {
       setSaving(true);
       await vendorsApi.create({
         ...formData,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        // created_at and updated_at are handled by backend
       } as any);
       await loadVendors();
       setShowAddModal(false);
@@ -88,7 +89,8 @@ const Vendors: React.FC = () => {
     if (!selectedVendor) return;
     try {
       setSaving(true);
-      await vendorsApi.update(selectedVendor.id.toString(), formData);
+      // FIX: Pass selectedVendor.id directly as number (removed .toString())
+      await vendorsApi.update(selectedVendor.id, formData);
       await loadVendors();
       setShowEditModal(false);
       setSelectedVendor(null);
@@ -111,7 +113,8 @@ const Vendors: React.FC = () => {
   const handleDeleteVendor = async (id: number) => {
     if (!confirm("Are you sure you want to delete this vendor?")) return;
     try {
-      await vendorsApi.delete(id.toString());
+      // FIX: Pass id directly as number (removed .toString())
+      await vendorsApi.delete(id);
       await loadVendors();
     } catch (error) {
       console.error("Failed to delete vendor:", error);

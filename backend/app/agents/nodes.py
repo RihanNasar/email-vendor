@@ -6,11 +6,11 @@ import json
 
 from app.config import settings
 from app.agents.state import EmailAgentState
-from app.models.schemas import EmailClassification, ExtractedShipmentInfo
+from app.models.schemas import EmailClassification, ExtractedShipmentInfo, EmailCategoryEnum
 
 
 class EmailClassificationNode:
-    """Node for classifying emails as shipping/logistics requests"""
+    """Node for classifying emails as shipping requests, queries, or spam"""
     
     def __init__(self):
         self.llm = ChatOpenAI(
@@ -25,21 +25,25 @@ class EmailClassificationNode:
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are an expert email classifier for a logistics company.
-Your task is to analyze emails and determine if they are shipping or logistics requests.
+Your job is to analyze incoming emails and categorize them into exactly ONE of the following categories:
 
-A shipping/logistics request typically contains:
-- Request to ship a package or freight
-- Mention of pickup and delivery locations
-- Package details (weight, dimensions, description)
-- Sender and recipient information
-- Logistics inquiries about rates, services, or tracking
+1. **shipping_request**: 
+   - A direct request to ship goods, get a freight rate, or a quote.
+   - Look for keywords like "Rate Request", "Quote", "Booking", "Shipment from X to Y".
+   - Includes "Forwarded" emails where the *original* message is a rate request.
 
-Classify the email into one of these categories:
-- shipping_request: Direct request to ship something
-- logistics_inquiry: Questions about shipping services, rates, or tracking
-- other: Not related to shipping or logistics
+2. **query**:
+   - General questions, tracking updates, or information requests.
+   - E.g., "Where is my package?", "Do you ship to Mars?", "What are your office hours?", "Status update please".
+   - This is NOT a request to start a NEW shipment.
 
-Provide your classification with confidence score (0-1) and reasoning.
+3. **spam**:
+   - Marketing emails, newsletters, solicitations to sell services TO us (e.g. SEO, Web Design), or obvious junk.
+
+4. **other**: 
+   - Personal emails, HR matters, or anything that fits none of the above.
+
+Provide your classification with a confidence score (0-1) and a brief reasoning.
 
 {format_instructions}"""),
             ("human", """Subject: {subject}
@@ -95,8 +99,9 @@ class InformationExtractionNode:
     """Node for extracting shipment information from email"""
     
     def __init__(self):
+        # Using gpt-4o is recommended for complex forwarded threads
         self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
+            model="gpt-4o", 
             temperature=0,
             api_key=settings.openai_api_key
         )
@@ -105,6 +110,7 @@ class InformationExtractionNode:
     def __call__(self, state: EmailAgentState) -> Dict[str, Any]:
         """Extract shipment information from the email"""
         
+        # Only run extraction if it is a shipping request
         if not state.get('is_shipping_request'):
             return {
                 "extracted_info": {},
@@ -113,29 +119,21 @@ class InformationExtractionNode:
             }
         
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert at extracting shipping information from emails.
+            ("system", """You are an expert at extracting shipping information from complex email threads.
 
-Extract ALL available information from the email. Look for:
+**CRITICAL INSTRUCTIONS FOR FORWARDED EMAILS:**
+1. This email likely contains multiple "Forwarded message" headers. 
+2. **IGNORE** the header information of the forwarder (the person sending *this* email).
+3. Look for the **ORIGINAL REQUESTER** signature at the bottom of the deepest message in the thread.
+4. Extract the 'Sender Name' from that original signature.
 
-SENDER INFORMATION:
-- Name, address, city, state, zipcode, country, phone
+**LOCATION INTELLIGENCE:**
+- If you see Airport/Port Codes (e.g., IST, RUH, JED, LHR, DXB), map them to their Cities (e.g., IST -> Istanbul, RUH -> Riyadh).
+- "Dry Port" -> Extract as the City/Location.
 
-RECIPIENT INFORMATION:
-- Name, address, city, state, zipcode, country, phone
-
-PACKAGE INFORMATION:
-- Weight (with units like lbs, kg)
-- Dimensions (length x width x height with units)
-- Description of contents
-- Declared value
-
-SERVICE INFORMATION:
-- Service type (express, standard, overnight, freight, etc.)
-- Preferred pickup date
-- Required delivery date
-
-Extract only information that is explicitly mentioned or clearly implied.
-Use null for fields that are not found in the email.
+**DATA EXTRACTION:**
+Extract ALL available information into the correct fields defined in the schema.
+- Combine Commodity, Temperature, and Container Type into 'package_description'.
 
 {format_instructions}"""),
             ("human", """Subject: {subject}
@@ -160,10 +158,10 @@ Extract all shipping information from this email.""")
             response = self.llm.invoke(formatted_prompt)
             extracted = self.parser.parse(response.content)
             
-            # Convert to dict and filter out None values
+            # Convert to dict and filter out None values or empty strings
             extracted_dict = {
                 k: v for k, v in extracted.dict().items() 
-                if v is not None
+                if v is not None and v != "" and v != "N/A"
             }
             
             return {
@@ -189,10 +187,8 @@ Extract all shipping information from this email.""")
 class ValidationNode:
     """Node for validating completeness of extracted information"""
     
-    # Only require the most essential fields for shipment (no city fields)
+    # We require specific fields to consider a request "complete" enough to process
     REQUIRED_FIELDS = [
-        "sender_name", "sender_address",
-        "recipient_name", "recipient_address",
         "package_description"
     ]
     
@@ -201,11 +197,18 @@ class ValidationNode:
         
         extracted_info = state.get('extracted_info', {})
         
-        # Always ask for all missing fields at once
-        missing_fields = [
-            field for field in self.REQUIRED_FIELDS
-            if field not in extracted_info or not extracted_info[field]
-        ]
+        # Logic: We need at least a City OR an Address for Origin and Destination
+        has_origin = extracted_info.get('sender_city') or extracted_info.get('sender_address')
+        has_dest = extracted_info.get('recipient_city') or extracted_info.get('recipient_address')
+        has_package = extracted_info.get('package_description')
+
+        missing_fields = []
+        if not has_origin:
+            missing_fields.append("sender_city")
+        if not has_dest:
+            missing_fields.append("recipient_city")
+        if not has_package:
+            missing_fields.append("package_description")
 
         is_complete = len(missing_fields) == 0
 
@@ -227,7 +230,7 @@ class ValidationNode:
 
 
 class ResponseGenerationNode:
-    """Node for generating email responses"""
+    """Node for generating email responses for Shipping Requests"""
     
     def __init__(self):
         self.llm = ChatOpenAI(
@@ -274,15 +277,14 @@ Generate a professional and friendly email confirming that you received all nece
 shipping information and that a shipment session has been created.
 
 Include:
-1. Thank them for providing complete information
-2. Briefly summarize the key details (sender, recipient, package)
-3. Mention that their shipment request is being processed
-4. Provide a reference number (use the email subject or create one)
-5. Offer to assist with any questions"""),
+1. Thank them for providing complete information.
+2. Briefly summarize the key details (Origin, Destination, Package) to show you understood.
+3. Mention that their shipment request is being processed.
+4. Offer to assist with any questions."""),
             ("human", """Generate a confirmation email for this shipment request:
 
-Sender: {sender_name}
-Recipient: {recipient_name}
+Origin: {sender_city}
+Destination: {recipient_city}
 Package: {package_description}
 
 Extracted information:
@@ -292,8 +294,8 @@ Extracted information:
         extracted_info = state.get('extracted_info', {})
         
         formatted_prompt = prompt.format_messages(
-            sender_name=extracted_info.get('sender_name', 'Unknown'),
-            recipient_name=extracted_info.get('recipient_name', 'Unknown'),
+            sender_city=extracted_info.get('sender_city', 'Unknown Origin'),
+            recipient_city=extracted_info.get('recipient_city', 'Unknown Destination'),
             package_description=extracted_info.get('package_description', 'Package'),
             extracted_info=json.dumps(extracted_info, indent=2)
         )
@@ -306,25 +308,18 @@ Extracted information:
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a friendly and casual logistics customer service agent.
-Generate a casual, conversational email requesting missing information for a shipping request.
+Generate a professional but conversational email requesting missing information for a shipping request.
 
 Tone guidelines:
-- Be warm and approachable, like talking to a friend
-- Use casual language (e.g., "Hey", "Thanks for reaching out", "Just need a few more details")
-- Keep it brief and to the point
-- Don't use overly formal phrases like "Dear Sir/Madam" or "We hereby inform you"
-- Use contractions (we'll, you're, it's) to sound more natural
-- End with something friendly like "Looking forward to hearing from you!" or "Thanks!"
+- Be warm and approachable.
+- If we successfully extracted some info (like Origin or Destination), mention it briefly.
+- List the MISSING info clearly (bullet points).
+- Ask them to reply with these details.
 
-Include:
-1. Quick thank you for their interest
-2. Mention you just need a bit more info to get started
-3. List the missing info in a simple, friendly way (use bullet points or a numbered list)
-4. If you have some info, briefly mention it so they know you're not starting from scratch
-5. Ask them to shoot back a reply when they can"""),
-            ("human", """Generate a casual request for missing information:
+"""),
+            ("human", """Generate a request for missing information:
 
-What we have:
+What we successfully extracted:
 {extracted_info}
 
 Missing information needed:

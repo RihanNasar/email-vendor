@@ -73,12 +73,14 @@ class EmailProcessingAgent:
                 - subject: Email subject
                 - body: Email body
                 - received_at: When email was received
+                - is_shipping_related: Boolean hint from heuristics
+                - thread_context: List of previous emails in thread
                 
         Returns:
             Final state after processing
         """
         
-        # Initialize state
+        # Initialize state with data from the Service
         initial_state: EmailAgentState = {
             "email_id": email_data.get("email_id"),
             "message_id": email_data["message_id"],
@@ -88,7 +90,12 @@ class EmailProcessingAgent:
             "subject": email_data["subject"],
             "body": email_data["body"],
             "received_at": email_data["received_at"],
-            "is_shipping_request": False,
+            
+            # Pass the heuristic hint. 
+            # Note: The 'classify' node will usually overwrite this based on LLM analysis,
+            # but the Service layer handles the final override if LLM fails but Regex succeeds.
+            "is_shipping_request": email_data.get("is_shipping_related", False),
+            
             "category": "other",
             "classification_confidence": 0.0,
             "classification_reasoning": "",
@@ -100,10 +107,14 @@ class EmailProcessingAgent:
             "response_sent": False,
             "current_step": "classify",
             "errors": [],
-            "agent_logs": []
+            "agent_logs": [],
+            
+            # Ensure thread context is passed if available
+            "thread_context": email_data.get("thread_context", [])
         }
         
         # Run the graph
+        # This executes the nodes defined in _build_graph in order
         result = self.graph.invoke(initial_state)
         
         return result
@@ -121,14 +132,14 @@ Email Processing Workflow:
    ↓
 
 2. EXTRACT_INFO
-   - Extract sender information
+   - Extract sender information (Original Sender from forwarded threads)
    - Extract recipient information
    - Extract package details
-   - Extract service requirements
+   - Map Airport Codes (IST, RUH) to Cities
    ↓
 
 3. VALIDATE
-   - Check for required fields
+   - Check for essential fields (Origin, Destination, Package)
    - Identify missing information
    - Determine if shipment is ready
    ↓
@@ -144,5 +155,5 @@ Email Processing Workflow:
 """
 
 
-# Create singleton instance
+# Create singleton instance to be imported by EmailService
 email_agent = EmailProcessingAgent()

@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Body
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
+from pydantic import BaseModel
 
 from app.models.database import get_db
 from app.models.schemas import (
     EmailResponse,
     ShipmentSessionResponse,
+    ShipmentSessionCreate,
     ShipmentStatusEnum,
     VendorResponse,
     VendorCreate,
@@ -19,6 +21,14 @@ from app.services.email_service import EmailService
 
 router = APIRouter()
 
+# --- Helper Models ---
+class EmailReplyRequest(BaseModel):
+    content: str
+
+class SessionStatusUpdate(BaseModel):
+    status: str
+
+# --- Helper Functions ---
 
 def _generate_vendor_notification(session: ShipmentSession, vendor: Vendor) -> str:
     """Generate a casual, human-like notification email for vendor"""
@@ -69,6 +79,10 @@ def get_email_service(db: Session = Depends(get_db)) -> EmailService:
     return EmailService(db)
 
 
+# ==========================================
+# EMAIL ENDPOINTS
+# ==========================================
+
 @router.post("/emails/check", response_model=dict)
 async def check_emails(
     background_tasks: BackgroundTasks,
@@ -77,13 +91,6 @@ async def check_emails(
 ):
     """
     Check for new unread emails and process them
-    
-    This endpoint triggers the email monitoring and processing workflow:
-    1. Fetch unread emails from Gmail
-    2. Classify each email
-    3. Extract shipping information
-    4. Validate completeness
-    5. Send appropriate responses
     """
     try:
         # Process emails in background
@@ -95,6 +102,42 @@ async def check_emails(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/emails/process")
+async def process_emails(
+    background_tasks: BackgroundTasks,
+    email_service: EmailService = Depends(get_email_service)
+):
+    """Process new emails (Alias for check_emails)"""
+    try:
+        background_tasks.add_task(email_service.process_new_emails, 50)
+        
+        return {
+            "status": "processing",
+            "message": "Email processing initiated"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/emails/", response_model=List[EmailResponse])
+async def get_emails(
+    is_shipping_request: Optional[bool] = None,
+    limit: int = 20,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    """Get all emails with optional filters"""
+    query = db.query(Email)
+    
+    if is_shipping_request is not None:
+        query = query.filter(Email.is_shipping_request == is_shipping_request)
+    
+    # FIX: Explicitly sort by received_at DESC (Newest First)
+    emails = query.order_by(Email.received_at.desc()).offset(offset).limit(limit).all()
+    
+    return emails
 
 
 @router.get("/emails/{email_id}", response_model=EmailResponse)
@@ -111,36 +154,209 @@ async def get_email(
     return email
 
 
+@router.post("/emails/{email_id}/reply")
+async def reply_to_email(
+    email_id: int,
+    reply_data: EmailReplyRequest,
+    email_service: EmailService = Depends(get_email_service)
+):
+    """
+    Manually reply to a specific email.
+    Used for handling Queries/Inquiries directly from the dashboard.
+    """
+    email = email_service.get_email_by_id(email_id)
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+        
+    try:
+        # Send the response using the service
+        response = email_service.send_response_email(
+            email=email,
+            message=reply_data.content,
+            response_type="manual_reply"
+        )
+        
+        if not response:
+            raise HTTPException(status_code=500, detail="Failed to send email via SMTP")
+            
+        return {"success": True, "messageId": response.response_message_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# SHIPMENT / SESSION ENDPOINTS
+# ==========================================
+
+@router.get("/sessions/", response_model=List[ShipmentSessionResponse])
+async def get_sessions(
+    status: Optional[str] = None,
+    vendor_id: Optional[int] = None,
+    limit: int = 20,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    """
+    Get all shipment sessions with optional filters.
+    Includes sorting by newest first.
+    """
+    query = db.query(ShipmentSession)
+    
+    if status:
+        query = query.filter(ShipmentSession.status == status)
+    if vendor_id:
+        query = query.filter(ShipmentSession.vendor_id == vendor_id)
+    
+    # Sort Sessions descending
+    sessions = query.order_by(ShipmentSession.created_at.desc()).offset(offset).limit(limit).all()
+    return sessions
+
+
+@router.post("/sessions/", response_model=ShipmentSessionResponse)
+async def create_session_manual(
+    session_data: ShipmentSessionCreate,
+    email_service: EmailService = Depends(get_email_service)
+):
+    """
+    Create a shipment session manually (e.g. converting a Query email into a Shipment).
+    """
+    email = email_service.get_email_by_id(session_data.email_id)
+    if not email:
+        raise HTTPException(status_code=404, detail="Original email not found")
+
+    # Convert Pydantic model to dict for the service
+    # We exclude email_id from the extracted_info dict
+    extracted_data = session_data.model_dump(exclude={'email_id'})
+    
+    # Calculate missing fields based on what was provided manually
+    required = ['sender_name', 'package_description']
+    missing = [field for field in required if not extracted_data.get(field)]
+    is_complete = len(missing) == 0
+
+    try:
+        session = email_service.create_shipment_session(
+            email=email,
+            extracted_info=extracted_data,
+            missing_fields=missing,
+            is_complete=is_complete
+        )
+        return session
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
+
+
+@router.get("/sessions/{session_id}", response_model=ShipmentSessionResponse)
+async def get_session(
+    session_id: int, 
+    db: Session = Depends(get_db)
+):
+    """Get session by ID"""
+    session = db.query(ShipmentSession).filter(ShipmentSession.id == session_id).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return session
+
+
+@router.post("/sessions/{session_id}/assign", response_model=ShipmentSessionResponse)
+async def assign_vendor(
+    session_id: int, 
+    data: dict, 
+    db: Session = Depends(get_db)
+):
+    """Assign vendor to session"""
+    try:
+        session = db.query(ShipmentSession).filter(ShipmentSession.id == session_id).first()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        vendor_id = data.get("vendor_id")
+        vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
+        
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+        
+        print(f"[VENDOR ASSIGNMENT] Assigning vendor {vendor.name} (email: {vendor.email}) to session #{session_id}", flush=True)
+        
+        session.vendor_id = vendor_id
+        session.vendor_notified_at = datetime.utcnow()
+        # Ensure status reflects it's waiting for vendor now, if it was just incomplete
+        if session.status == ShipmentStatus.INCOMPLETE:
+             session.status = ShipmentStatus.PENDING_INFO 
+             
+        db.commit()
+        db.refresh(session)
+        
+        print(f"[VENDOR ASSIGNMENT] Session #{session_id} updated: vendor_id={session.vendor_id}, vendor_notified_at={session.vendor_notified_at}", flush=True)
+        
+        # Send notification email to vendor
+        if vendor.email:
+            try:
+                print(f"[VENDOR NOTIFICATION] Preparing email to: {vendor.email}", flush=True)
+                email_body = _generate_vendor_notification(session, vendor)
+                print(f"[VENDOR NOTIFICATION] Email body generated, sending...", flush=True)
+                result = smtp_service.send_email(
+                    to_email=vendor.email,
+                    subject=f"New Shipment Assignment - {session.id}",
+                    body=email_body
+                )
+                print(f"[VENDOR NOTIFICATION] Send result: {result}", flush=True)
+            except Exception as e:
+                print(f"[VENDOR NOTIFICATION] Error: {str(e)}", flush=True)
+        else:
+            print(f"[VENDOR NOTIFICATION] Vendor {vendor.name} has no email", flush=True)
+        
+        return session
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to assign vendor: {str(e)}")
+
+
+@router.put("/sessions/{session_id}/status", response_model=ShipmentSessionResponse)
+async def update_session_status(
+    session_id: int, 
+    status_update: SessionStatusUpdate, 
+    db: Session = Depends(get_db)
+):
+    """Update session status"""
+    session = db.query(ShipmentSession).filter(ShipmentSession.id == session_id).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session.status = status_update.status
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+# --- Specific List Endpoints (For legacy support or specific UI needs) ---
+
 @router.get("/shipments", response_model=List[ShipmentSessionResponse])
 async def list_shipments(
     status: Optional[ShipmentStatusEnum] = None,
     limit: int = 100,
     email_service: EmailService = Depends(get_email_service)
 ):
-    """
-    List shipment sessions with optional status filter
-    
-    Args:
-        status: Filter by shipment status (incomplete, pending_info, complete, created)
-        limit: Maximum number of results
-    """
+    """Legacy alias for /sessions/"""
     status_filter = ShipmentStatus(status.value) if status else None
     shipments = email_service.get_shipment_sessions(status=status_filter, limit=limit)
-    
     return shipments
 
 
 @router.get("/shipments/{shipment_id}", response_model=ShipmentSessionResponse)
-async def get_shipment(
+async def get_shipment_legacy(
     shipment_id: int,
     email_service: EmailService = Depends(get_email_service)
 ):
-    """Get shipment session by ID"""
+    """Legacy alias for /sessions/{id}"""
     shipment = email_service.get_shipment_by_id(shipment_id)
-    
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
-    
     return shipment
 
 
@@ -149,12 +365,11 @@ async def list_incomplete_shipments(
     limit: int = 100,
     email_service: EmailService = Depends(get_email_service)
 ):
-    """List all incomplete shipments that need additional information"""
+    """List all incomplete shipments"""
     shipments = email_service.get_shipment_sessions(
         status=ShipmentStatus.INCOMPLETE,
         limit=limit
     )
-    
     return shipments
 
 
@@ -163,55 +378,18 @@ async def list_complete_shipments(
     limit: int = 100,
     email_service: EmailService = Depends(get_email_service)
 ):
-    """List all complete shipments ready for processing"""
+    """List all complete shipments"""
     shipments = email_service.get_shipment_sessions(
         status=ShipmentStatus.COMPLETE,
         limit=limit
     )
-    
     return shipments
 
 
-@router.get("/outlook/authenticate")
-async def authenticate_email():
-    """
-    Authenticate with email service (SMTP/IMAP)
-    
-    For SMTP, this verifies the connection to both IMAP and SMTP servers.
-    """
-    try:
-        success = smtp_service.authenticate()
-        
-        if success:
-            return {"status": "success", "message": "Email authentication successful"}
-        else:
-            raise HTTPException(status_code=500, detail="Authentication failed")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# ==========================================
+# VENDOR ENDPOINTS
+# ==========================================
 
-
-# Dashboard Stats endpoint
-@router.get("/dashboard/stats")
-async def get_dashboard_stats(db: Session = Depends(get_db)):
-    """Get dashboard statistics"""
-    from app.models.models import Email, ShipmentSession, EmailCategory, ShipmentStatus
-    
-    total_emails = db.query(Email).count()
-    shipping_requests = db.query(Email).filter(Email.category == EmailCategory.SHIPPING_REQUEST).count() if hasattr(EmailCategory, 'SHIPPING_REQUEST') else 0
-    total_shipments = db.query(ShipmentSession).count()
-    complete_shipments = db.query(ShipmentSession).filter(ShipmentSession.status == ShipmentStatus.COMPLETE).count()
-    incomplete_shipments = db.query(ShipmentSession).filter(ShipmentSession.status != ShipmentStatus.COMPLETE).count()
-
-    return {
-        "total_emails": total_emails,
-        "shipping_requests": shipping_requests,
-        "total_shipments": total_shipments,
-        "complete_shipments": complete_shipments,
-        "incomplete_shipments": incomplete_shipments
-    }
-
-
-# Vendors endpoints
 @router.get("/vendors", response_model=List[VendorResponse])
 async def get_vendors(
     vendor_type: Optional[str] = None,
@@ -300,150 +478,14 @@ async def delete_vendor(vendor_id: int, db: Session = Depends(get_db)):
     return {"status": "success", "message": "Vendor deleted"}
 
 
-# Sessions/Shipments endpoints
-@router.get("/sessions/", response_model=List[ShipmentSessionResponse])
-async def get_sessions(
-    status: Optional[str] = None,
-    vendor_id: Optional[int] = None,
-    db: Session = Depends(get_db)
-):
-    """Get all shipment sessions with optional filters"""
-    query = db.query(ShipmentSession)
-    
-    if status:
-        query = query.filter(ShipmentSession.status == status)
-    if vendor_id:
-        query = query.filter(ShipmentSession.vendor_id == vendor_id)
-    
-    sessions = query.all()
-    return sessions
-
-
-@router.get("/sessions/{session_id}", response_model=ShipmentSessionResponse)
-async def get_session(session_id: int, db: Session = Depends(get_db)):
-    """Get session by ID"""
-    session = db.query(ShipmentSession).filter(ShipmentSession.id == session_id).first()
-    
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    return session
-
-
-@router.post("/sessions/{session_id}/assign", response_model=ShipmentSessionResponse)
-async def assign_vendor(session_id: int, data: dict, db: Session = Depends(get_db)):
-    """Assign vendor to session"""
-    try:
-        session = db.query(ShipmentSession).filter(ShipmentSession.id == session_id).first()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        vendor_id = data.get("vendor_id")
-        vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
-        
-        if not vendor:
-            raise HTTPException(status_code=404, detail="Vendor not found")
-        
-        print(f"[VENDOR ASSIGNMENT] Assigning vendor {vendor.name} (email: {vendor.email}) to session #{session_id}", flush=True)
-        
-        session.vendor_id = vendor_id
-        session.vendor_notified_at = datetime.utcnow()
-        db.commit()
-        db.refresh(session)
-        
-        print(f"[VENDOR ASSIGNMENT] Session #{session_id} updated: vendor_id={session.vendor_id}, vendor_notified_at={session.vendor_notified_at}", flush=True)
-        
-        # Send notification email to vendor
-        if vendor.email:
-            try:
-                print(f"[VENDOR NOTIFICATION] Preparing email to: {vendor.email}", flush=True)
-                email_body = _generate_vendor_notification(session, vendor)
-                print(f"[VENDOR NOTIFICATION] Email body generated, sending...", flush=True)
-                result = smtp_service.send_email(
-                    to_email=vendor.email,
-                    subject=f"New Shipment Assignment - {session.id}",
-                    body=email_body
-                )
-                print(f"[VENDOR NOTIFICATION] Send result: {result}", flush=True)
-            except Exception as e:
-                print(f"[VENDOR NOTIFICATION] Error: {str(e)}", flush=True)
-        else:
-            print(f"[VENDOR NOTIFICATION] Vendor {vendor.name} has no email", flush=True)
-        
-        return session
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to assign vendor: {str(e)}")
-
-
-@router.patch("/sessions/{session_id}/status", response_model=ShipmentSessionResponse)
-async def update_session_status(session_id: int, data: dict, db: Session = Depends(get_db)):
-    """Update session status"""
-    session = db.query(ShipmentSession).filter(ShipmentSession.id == session_id).first()
-    
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    session.status = data.get("status")
-    db.commit()
-    db.refresh(session)
-    return session
-
-
-# Emails endpoints
-@router.get("/emails/", response_model=List[EmailResponse])
-async def get_emails(
-    is_shipping_request: Optional[bool] = None,
-    db: Session = Depends(get_db)
-):
-    """Get all emails with optional filters"""
-    query = db.query(Email)
-    
-    if is_shipping_request is not None:
-        query = query.filter(Email.is_shipping_request == is_shipping_request)
-    
-    emails = query.all()
-    return emails
-
-
-@router.get("/emails/{email_id}", response_model=EmailResponse)
-async def get_email(email_id: int, db: Session = Depends(get_db)):
-    """Get email by ID"""
-    email = db.query(Email).filter(Email.id == email_id).first()
-    
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
-    
-    return email
-
-
-@router.post("/emails/process")
-async def process_emails(
-    background_tasks: BackgroundTasks,
-    email_service: EmailService = Depends(get_email_service)
-):
-    """Process new emails"""
-    try:
-        background_tasks.add_task(email_service.process_new_emails, 50)
-        
-        return {
-            "status": "processing",
-            "message": "Email processing initiated"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+# ==========================================
+# SYSTEM / DASHBOARD ENDPOINTS
+# ==========================================
 
 @router.get("/outlook/authenticate")
-async def authenticate_outlook():
+async def authenticate_email():
     """
     Authenticate with email service (SMTP/IMAP)
-    
-    For SMTP, this verifies the connection to both IMAP and SMTP servers.
-    Note: Outlook OAuth is not currently implemented - using SMTP/IMAP instead.
     """
     try:
         success = smtp_service.authenticate()
@@ -456,34 +498,33 @@ async def authenticate_outlook():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "Email Vendor Agent"}
-
-
-@router.get("/stats")
-async def get_stats(db: Session = Depends(get_db)):
-    """Get system statistics"""
-    from app.models.models import Email, ShipmentSession, EmailCategory, ShipmentStatus
-    
+@router.get("/dashboard/stats")
+async def get_dashboard_stats(db: Session = Depends(get_db)):
+    """Get dashboard statistics"""
     total_emails = db.query(Email).count()
-    shipping_requests = db.query(Email).filter(
-        Email.category == EmailCategory.SHIPPING_REQUEST
-    ).count()
     
+    shipping_requests = 0
+    try:
+        shipping_requests = db.query(Email).filter(Email.category == EmailCategory.SHIPPING_REQUEST).count()
+    except:
+        pass
+        
     total_shipments = db.query(ShipmentSession).count()
-    complete_shipments = db.query(ShipmentSession).filter(
-        ShipmentSession.status == ShipmentStatus.COMPLETE
-    ).count()
-    incomplete_shipments = db.query(ShipmentSession).filter(
-        ShipmentSession.status == ShipmentStatus.INCOMPLETE
-    ).count()
-    
+    complete_shipments = db.query(ShipmentSession).filter(ShipmentSession.status == ShipmentStatus.COMPLETE).count()
+    incomplete_shipments = db.query(ShipmentSession).filter(ShipmentSession.status != ShipmentStatus.COMPLETE).count()
+    vendor_replied_sessions = db.query(ShipmentSession).filter(ShipmentSession.vendor_replied_at.isnot(None)).count()
+
     return {
         "total_emails": total_emails,
         "shipping_requests": shipping_requests,
         "total_shipments": total_shipments,
         "complete_shipments": complete_shipments,
-        "incomplete_shipments": incomplete_shipments
+        "incomplete_shipments": incomplete_shipments,
+        "vendor_replied_sessions": vendor_replied_sessions
     }
+
+
+@router.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "service": "Email Vendor Agent"}

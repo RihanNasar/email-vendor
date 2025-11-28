@@ -6,7 +6,9 @@ from enum import Enum
 
 class EmailCategoryEnum(str, Enum):
     SHIPPING_REQUEST = "shipping_request"
-    LOGISTICS_INQUIRY = "logistics_inquiry"
+    QUERY = "query"          # General questions
+    SPAM = "spam"            # Junk/Marketing
+    LOGISTICS_INQUIRY = "logistics_inquiry" # Legacy/Specific inquiry
     OTHER = "other"
 
 
@@ -30,6 +32,7 @@ class EmailStatusEnum(str, Enum):
     COMPLETED = "completed"
     UNPROCESSED = "unprocessed"
     FAILED = "failed"
+    IGNORED = "ignored" # Used for Spam
 
 
 class VendorTypeEnum(str, Enum):
@@ -39,6 +42,58 @@ class VendorTypeEnum(str, Enum):
     COURIER = "courier"
     WAREHOUSE = "warehouse"
 
+
+# --- AI / LLM SPECIFIC MODELS (Used by Agents) ---
+
+class EmailClassification(BaseModel):
+    """Schema for email classification results"""
+    category: EmailCategoryEnum = Field(description="The classification category: shipping_request, query, or spam")
+    is_shipping_request: bool = Field(description="True ONLY if it is a request for a shipping rate, quote, or booking")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score between 0 and 1")
+    reasoning: str = Field(description="Brief explanation of why this classification was chosen")
+
+
+class ExtractedShipmentInfo(BaseModel):
+    """Schema for extracted shipment information - Used by AI Agent"""
+    
+    # Sender / Origin
+    sender_name: Optional[str] = Field(None, description="Name of the original requester/sender (look for signature in forwarded emails)")
+    sender_address: Optional[str] = Field(None, description="Full origin address if available")
+    sender_city: Optional[str] = Field(None, description="Origin City (Map airport codes like IST to Istanbul)")
+    sender_state: Optional[str] = Field(None, description="Origin State/Province")
+    sender_zipcode: Optional[str] = Field(None, description="Origin Zip/Postal Code")
+    sender_country: Optional[str] = Field(None, description="Origin Country")
+    sender_phone: Optional[str] = Field(None, description="Sender phone number")
+    
+    # Recipient / Destination
+    recipient_name: Optional[str] = Field(None, description="Name of the recipient")
+    recipient_address: Optional[str] = Field(None, description="Full destination address if available")
+    recipient_city: Optional[str] = Field(None, description="Destination City (Map airport codes like RUH to Riyadh)")
+    recipient_state: Optional[str] = Field(None, description="Destination State/Province")
+    recipient_zipcode: Optional[str] = Field(None, description="Destination Zip/Postal Code")
+    recipient_country: Optional[str] = Field(None, description="Destination Country")
+    recipient_phone: Optional[str] = Field(None, description="Recipient phone number")
+    
+    # Package Details
+    package_weight: Optional[str] = Field(None, description="Weight with units (e.g. 500kg)")
+    package_dimensions: Optional[str] = Field(None, description="Dimensions with units (e.g. 10x10x10 cm)")
+    package_description: Optional[str] = Field(None, description="Combined description: Commodity + Container Type + Temperature (e.g. '20ft Reefer, Chestnuts, 7C')")
+    package_value: Optional[str] = Field(None, description="Declared value of goods")
+    
+    # Service Details
+    service_type: Optional[str] = Field(None, description="Requested service (Door to Door, Port to Port, Air, Sea)")
+    pickup_date: Optional[str] = Field(None, description="Requested pickup date")
+    delivery_date: Optional[str] = Field(None, description="Requested delivery date")
+
+
+class MissingInfoResponse(BaseModel):
+    """Schema for missing information response"""
+    missing_fields: List[str]
+    message: str
+    extracted_info: Dict[str, Any]
+
+
+# --- API / DB MODELS (Used by API & Frontend) ---
 
 class EmailBase(BaseModel):
     message_id: str
@@ -181,49 +236,6 @@ class ShipmentSessionResponse(ShipmentSessionBase):
             'created_at': {'alias': 'createdAt'},
             'updated_at': {'alias': 'updatedAt'}
         }
-
-
-class EmailClassification(BaseModel):
-    """Schema for email classification results"""
-    category: EmailCategoryEnum
-    is_shipping_request: bool
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    reasoning: str
-
-
-class ExtractedShipmentInfo(BaseModel):
-    """Schema for extracted shipment information"""
-    sender_name: Optional[str] = None
-    sender_address: Optional[str] = None
-    sender_city: Optional[str] = None
-    sender_state: Optional[str] = None
-    sender_zipcode: Optional[str] = None
-    sender_country: Optional[str] = None
-    sender_phone: Optional[str] = None
-    
-    recipient_name: Optional[str] = None
-    recipient_address: Optional[str] = None
-    recipient_city: Optional[str] = None
-    recipient_state: Optional[str] = None
-    recipient_zipcode: Optional[str] = None
-    recipient_country: Optional[str] = None
-    recipient_phone: Optional[str] = None
-    
-    package_weight: Optional[str] = None
-    package_dimensions: Optional[str] = None
-    package_description: Optional[str] = None
-    package_value: Optional[str] = None
-    
-    service_type: Optional[str] = None
-    pickup_date: Optional[str] = None
-    delivery_date: Optional[str] = None
-
-
-class MissingInfoResponse(BaseModel):
-    """Schema for missing information response"""
-    missing_fields: List[str]
-    message: str
-    extracted_info: Dict[str, Any]
 
 
 # Vendor Schemas

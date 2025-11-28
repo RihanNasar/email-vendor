@@ -17,11 +17,12 @@ import Analytics from "./pages/Analytics";
 const App: React.FC = () => {
   return (
     <Router>
-      <div className="flex min-h-screen bg-background">
+      <div className="flex min-h-screen bg-white">
         <Sidebar />
-        <main className="flex-1 flex flex-col ml-20">
+        {/* Adjusted ml-64 to ml-56 to match the slimmer sidebar */}
+        <main className="flex-1 flex flex-col ml-56 transition-all duration-300">
           <TopNav />
-          <div className="flex-1 overflow-auto">
+          <div className="flex-1 overflow-auto bg-gray-50/50">
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/sessions" element={<Sessions />} />
@@ -47,19 +48,20 @@ const Sidebar: React.FC = () => {
   ];
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-20 bg-white border-r border-gray-200 flex flex-col items-center py-6 hover:w-64 transition-all duration-300 ease-in-out group overflow-hidden shadow-sm z-50">
+    // Changed w-64 to w-56 for a slimmer look
+    <aside className="fixed left-0 top-0 h-screen w-56 bg-white border-r border-gray-100 flex flex-col py-8 z-50">
       {/* Logo Section */}
-      <div className="mb-8 flex items-center gap-3 px-2 w-full">
-        <div className="min-w-[40px] h-10 rounded-2xl bg-blue-600 flex items-center justify-center rotate-[-8deg] group-hover:rotate-0 transition-transform duration-300 shadow-md">
-          <Mail className="w-5 h-5 text-white" />
+      <div className="px-6 mb-8 flex items-center gap-3">
+        <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+          <Mail className="w-4 h-4 text-white" />
         </div>
-        <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
-          <h2 className="text-lg font-bold text-gray-900">EmailVendor</h2>
-        </div>
+        <span className="text-lg font-bold text-gray-900 tracking-tight">
+          EmailVendor
+        </span>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 w-full space-y-1 px-2">
+      <nav className="flex-1 px-3 space-y-2">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = location.pathname === item.path;
@@ -68,27 +70,25 @@ const Sidebar: React.FC = () => {
               key={item.path}
               to={item.path}
               className={cn(
-                "relative flex items-center gap-4 px-3 py-3 rounded-2xl text-sm font-medium transition-all duration-200 w-full overflow-hidden",
+                "relative flex items-center px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 group",
                 isActive
-                  ? "bg-blue-600 text-white shadow-lg shadow-blue-200"
-                  : "text-gray-600 hover:bg-gray-100 hover:text-gray-900"
+                  ? "bg-blue-50 text-blue-700 shadow-sm"
+                  : "text-gray-500 hover:bg-gray-50 hover:text-gray-900"
               )}
             >
-              <div
+              <Icon
                 className={cn(
-                  "min-w-[24px] flex items-center justify-center transition-transform group-hover:scale-110",
+                  "w-5 h-5 mr-3 transition-colors duration-200",
                   isActive
-                    ? "rotate-[-8deg]"
-                    : "rotate-0 group-hover:rotate-[-4deg]"
+                    ? "text-blue-600"
+                    : "text-gray-400 group-hover:text-gray-600"
                 )}
-              >
-                <Icon className="w-5 h-5" />
-              </div>
-              <span className="opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
-                {item.label}
-              </span>
+              />
+              <span>{item.label}</span>
+
+              {/* Active indicator dot */}
               {isActive && (
-                <div className="absolute left-0 w-1 h-6 bg-white rounded-r-full opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="absolute right-3 w-1.5 h-1.5 rounded-full bg-blue-600" />
               )}
             </Link>
           );
@@ -117,7 +117,7 @@ const TopNav: React.FC = () => {
     }
   };
   return (
-    <header className="sticky top-0 z-10 bg-white border-b border-gray-200">
+    <header className="sticky top-0 z-10 bg-white/80 backdrop-blur-sm border-b border-gray-100">
       <div className="flex items-center justify-between px-8 py-5">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">

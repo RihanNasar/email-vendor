@@ -4,13 +4,6 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,tsx,js,jsx}"],
   theme: {
     extend: {
-      fontFamily: {
-        sans: ["Space Grotesk", "Inter", "ui-sans-serif", "system-ui"],
-      },
-      fontSize: {
-        '2.5xl': '1.6rem',
-        '3.5xl': '2rem',
-      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",

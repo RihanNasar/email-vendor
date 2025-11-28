@@ -20,6 +20,7 @@ const Dashboard: React.FC = () => {
     total_shipments: 0,
     complete_shipments: 0,
     incomplete_shipments: 0,
+    vendor_replied_sessions: 0,
   });
   const [recentEmails, setRecentEmails] = useState<Email[]>([]);
   const [recentSessions, setRecentSessions] = useState<ShipmentSession[]>([]);
@@ -57,6 +58,7 @@ const Dashboard: React.FC = () => {
         total_shipments: 0,
         complete_shipments: 0,
         incomplete_shipments: 0,
+        vendor_replied_sessions: 0,
       });
     } finally {
       setLoading(false);

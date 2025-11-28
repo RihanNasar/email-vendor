@@ -22,6 +22,7 @@ const Analytics: React.FC = () => {
     total_shipments: 0,
     complete_shipments: 0,
     incomplete_shipments: 0,
+    vendor_replied_sessions: 0,
   });
   const [sessions, setSessions] = useState<ShipmentSession[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -114,31 +115,17 @@ const Analytics: React.FC = () => {
   const generateInsights = () => {
     const insights = [];
 
-    if (sessions.length > 0) {
-      const avgResponseTime =
-        sessions
-          .filter((s) => s.vendor_notified_at && s.vendor_replied_at)
-          .reduce((acc, s) => {
-            const diff =
-              new Date(s.vendor_replied_at!).getTime() -
-              new Date(s.vendor_notified_at!).getTime();
-            return acc + diff;
-          }, 0) / sessions.filter((s) => s.vendor_replied_at).length;
-
-      if (avgResponseTime) {
-        const hours = Math.round(avgResponseTime / (1000 * 60 * 60));
-        insights.push({
-          type: "success",
-          text: `Average vendor response time is ${hours} hours`,
-        });
-      }
+    if (stats.vendor_replied_sessions > 0) {
+      insights.push({
+        type: "success",
+        text: `${stats.vendor_replied_sessions} sessions have been replied to by vendors`,
+      });
     }
 
-    const topVendor = getVendorStats()[0];
-    if (topVendor && topVendor.totalSessions > 0) {
+    if (stats.complete_shipments > 0) {
       insights.push({
         type: "info",
-        text: `${topVendor.name} is your most active vendor with ${topVendor.totalSessions} sessions`,
+        text: `${stats.complete_shipments} sessions have been completed`,
       });
     }
 

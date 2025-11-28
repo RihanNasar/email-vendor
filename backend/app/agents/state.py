@@ -14,6 +14,11 @@ class EmailAgentState(TypedDict):
     body: str
     received_at: datetime
     
+    # Context & Metadata (ADDED THESE)
+    thread_context: List[Dict[str, Any]]  # Holds previous emails in the thread
+    is_forwarded: bool                    # Helps agent know to look for original sender
+    is_reply: bool                        # Helps context understanding
+    
     # Classification results
     is_shipping_request: bool
     category: str
