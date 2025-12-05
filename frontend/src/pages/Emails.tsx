@@ -1,12 +1,10 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import {
   Mail,
-  Clock,
   ChevronDown,
   ChevronUp,
   User,
   Search,
-  AlertCircle,
   CheckCircle2,
   Package,
   Send,
@@ -15,71 +13,108 @@ import {
   X,
   CornerDownRight,
   MoreHorizontal,
-  Paperclip,
+  FileText,
+  AlertCircle,
 } from "lucide-react";
 import { emailsApi, sessionsApi } from "../services/api";
 import type { Email, EmailThread, ShipmentSessionCreate } from "../types";
 
 const Emails: React.FC = () => {
-  // --- State Management ---
+  // ==========================================
+  // 1. STATE MANAGEMENT
+  // ==========================================
   const [emails, setEmails] = useState<Email[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Filters: 'all', 'shipping', 'query', 'spam'
+  // Filters
   const [filter, setFilter] = useState<"all" | "shipping" | "query" | "spam">(
     "all"
   );
 
-  // UI State: Which thread is currently expanded
+  // UI State
   const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null);
+  const replyBoxRef = useRef<HTMLTextAreaElement>(null);
 
   // Reply State
   const [replyText, setReplyText] = useState("");
   const [sendingReply, setSendingReply] = useState(false);
 
-  // Manual Session Creation State (Modal)
+  // Session Management State (Create/Update)
   const [showSessionModal, setShowSessionModal] = useState(false);
+  const [sessionModalMode, setSessionModalMode] = useState<"create" | "update">(
+    "create"
+  );
   const [selectedEmailForSession, setSelectedEmailForSession] =
     useState<Email | null>(null);
   const [sessionForm, setSessionForm] = useState<
     Partial<ShipmentSessionCreate>
   >({});
-  const [creatingSession, setCreatingSession] = useState(false);
+  const [isSavingSession, setIsSavingSession] = useState(false);
 
-  // Pagination State
+  // Pagination
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize] = useState(20);
 
-  // Auto-scroll ref for chat view
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // ==========================================
+  // 2. EFFECTS
+  // ==========================================
 
-  // --- Effects ---
-
-  // 1. Initial Load & Polling
+  // Initial Load & Polling
   useEffect(() => {
     loadEmails();
-    const interval = setInterval(loadEmails, 30000); // Auto-refresh every 30s
+    const interval = setInterval(loadEmails, 15000); // Poll every 15s
     return () => clearInterval(interval);
-  }, [page, pageSize]); // Reload when page/size changes
+  }, [page, pageSize, filter]); // Add filter dependency
 
-  // 2. Auto-scroll to bottom when a thread is expanded or new emails arrive
+  // Reset to page 1 when filter changes
   useEffect(() => {
-    if (expandedThreadId && messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [expandedThreadId, emails]);
+    setPage(1);
+  }, [filter]);
 
-  // --- API Actions ---
+  // Auto-focus reply box when expanding a query thread (But NO scrolling)
+  useEffect(() => {
+    if (expandedThreadId && replyBoxRef.current) {
+      // Small timeout to ensure DOM rendering is complete
+      setTimeout(() => {
+        replyBoxRef.current?.focus();
+      }, 100);
+    }
+  }, [expandedThreadId]);
+
+  // ==========================================
+  // 3. API ACTIONS
+  // ==========================================
 
   const loadEmails = async () => {
     try {
-      setLoading(true);
+      if (emails.length === 0) setLoading(true);
       const offset = (page - 1) * pageSize;
-      // Fetch emails based on pagination. Filtering is currently done client-side
-      // but parameters exist to move it server-side if needed.
-      const response = await emailsApi.getAll(undefined, pageSize, offset);
+
+      console.log(
+        `🔄 [Sync] Fetching emails... Filter: ${filter}, Page: ${page}, Offset: ${offset}`
+      );
+
+      // Pass filter to API - backend will handle filtering
+      const categoryParam = filter !== "all" ? filter : undefined;
+      const response = await emailsApi.getAll(categoryParam, pageSize, offset);
+
+      console.log(
+        `✅ [Sync] Received ${
+          Array.isArray(response)
+            ? response.length
+            : (response as any)?.data?.length || 0
+        } emails from server`
+      );
 
       if (Array.isArray(response)) {
+        // Debug logging to verify if responses are coming back
+        const hasReplies = response.some(
+          (e) => e.responses && e.responses.length > 0
+        );
+        if (hasReplies) {
+          console.log("✅ [Sync] Server returned emails WITH nested replies.");
+        }
+
         setEmails(response);
       } else if ((response as any).data) {
         setEmails((response as any).data);
@@ -93,79 +128,164 @@ const Emails: React.FC = () => {
 
   const handleSendReply = async (latestEmail: Email) => {
     if (!replyText.trim()) return;
+
+    const replyContent = replyText.trim();
+    setReplyText(""); // Clear immediately for better UX
+
     try {
       setSendingReply(true);
 
-      // 1. Send to Backend
-      await emailsApi.reply(latestEmail.id, replyText);
+      // Find the root email ID to send the reply to
+      const rootEmailId =
+        (latestEmail as any).__originalEmailId || latestEmail.id;
 
-      // 2. Optimistic Update: Add reply to UI immediately for better UX
-      const optimisticReply: Email = {
-        id: Date.now(), // Temp ID
-        message_id: `temp_${Date.now()}`,
-        thread_id: latestEmail.thread_id,
-        sender_email: "support@yourcompany.com",
-        sender_name: "You",
-        subject: latestEmail.subject,
-        body: replyText,
-        category: latestEmail.category,
-        is_shipping_request: false,
-        status: "completed",
-        received_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        is_reply: true, // Mark as sent by us
-        is_forwarded: false,
-      };
+      console.log(`🚀 [Action] Sending reply to root email #${rootEmailId}...`);
+      const response = await emailsApi.reply(rootEmailId, replyContent);
 
-      setEmails((prev) => [optimisticReply, ...prev]);
-      setReplyText("");
+      // Capture the variable here to ensure narrowing works in the closure
+      const updatedEmail = response.data.email;
 
-      // 3. Background Refresh to sync with server
-      setTimeout(() => loadEmails(), 1000);
+      // Check if backend returned the updated email
+      if (updatedEmail) {
+        console.log("✅ [Backend] Received updated email with responses");
+
+        // Update the email in state with the real data from backend
+        setEmails((prev) => {
+          return prev.map((email) => {
+            if (email.id === rootEmailId) {
+              return updatedEmail;
+            }
+            return email;
+          });
+        });
+      } else {
+        // Fallback: Optimistic update if backend doesn't return full email
+        console.log("✨ [UI] Applying optimistic update (Fallback)...");
+        const tempReplyId = `temp_${Date.now()}`;
+        const now = new Date().toISOString();
+
+        setEmails((prev) => {
+          return prev.map((email) => {
+            if (email.id === rootEmailId) {
+              console.log(`📧 Adding optimistic reply to email #${email.id}`);
+              return {
+                ...email,
+                status: "completed",
+                updated_at: now,
+                responses: [
+                  ...(email.responses || []),
+                  {
+                    id: tempReplyId,
+                    body: replyContent,
+                    sent_at: now,
+                  },
+                ],
+              };
+            }
+            return email;
+          });
+        });
+
+        // Refresh after delay to get real data
+        console.log("⏰ [Timer] Scheduling refresh in 4s...");
+        setTimeout(async () => {
+          console.log("🔄 [Refresh] Loading updated emails from server...");
+          await loadEmails();
+        }, 4000);
+      }
     } catch (error) {
-      console.error("Failed to send reply", error);
-      alert("Failed to send reply.");
+      console.error("❌ Failed to send reply:", error);
+      alert("Failed to send reply. Please try again.");
+      setReplyText(replyContent);
     } finally {
       setSendingReply(false);
     }
   };
 
-  const handleCreateSession = async () => {
+  const handleSaveSession = async () => {
     if (!selectedEmailForSession) return;
+
+    // Validation
+    if (!sessionForm.sender_name || !sessionForm.package_description) {
+      alert("Sender Name and Package Description are required.");
+      return;
+    }
+
     try {
-      setCreatingSession(true);
+      setIsSavingSession(true);
 
-      // Create session via API
-      await sessionsApi.create({
+      // Construct payload
+      const payload: ShipmentSessionCreate = {
         email_id: selectedEmailForSession.id,
-        ...sessionForm,
-      } as any);
+        sender_name: sessionForm.sender_name,
+        package_description: sessionForm.package_description,
+        recipient_name: sessionForm.recipient_name || "",
+        sender_city: sessionForm.sender_city || "",
+        recipient_city: sessionForm.recipient_city || "",
+        sender_address: sessionForm.sender_city || "", // Fallback
+        recipient_address: sessionForm.recipient_city || "", // Fallback
+        sender_country: "",
+        recipient_country: "",
+        package_weight: "",
+        service_type: "Standard",
+      };
 
-      // Reset and Close
+      // The 'create' endpoint in backend handles "Update if exists" logic automatically
+      await sessionsApi.create(payload);
+
       setShowSessionModal(false);
       setSessionForm({});
-      loadEmails(); // Refresh list to show updated status
-      alert("Session created successfully!");
+      loadEmails();
+
+      const actionWord = sessionModalMode === "create" ? "created" : "updated";
+      alert(`Session ${actionWord} successfully!`);
     } catch (error) {
-      console.error("Failed to create session", error);
-      alert("Failed to create session.");
+      console.error("Failed to save session", error);
+      alert("Failed to save session. Please check the console.");
     } finally {
-      setCreatingSession(false);
+      setIsSavingSession(false);
     }
   };
 
-  // --- Helpers ---
+  // ==========================================
+  // 4. HELPERS & THREAD LOGIC
+  // ==========================================
 
-  const openSessionModal = (email: Email) => {
+  const openSessionModal = async (email: Email) => {
     setSelectedEmailForSession(email);
-    // Pre-fill form with available data
-    setSessionForm({
-      sender_name: email.sender_name || "",
-      package_description: "",
-      sender_city: "",
-      recipient_city: "",
-    });
+
+    // Check if session exists via the 'session_id' property (added in backend model)
+    const hasSession = (email as any).session_id;
+
+    if (hasSession) {
+      setSessionModalMode("update");
+      try {
+        // Pre-fill existing session data for editing
+        const res = await sessionsApi.getById(hasSession);
+        setSessionForm({
+          sender_name: res.data.sender_name,
+          recipient_name: res.data.recipient_name,
+          sender_city: res.data.sender_city,
+          recipient_city: res.data.recipient_city,
+          package_description: res.data.package_description,
+        });
+      } catch (e) {
+        console.error("Failed to fetch existing session", e);
+        // Fallback if fetch fails
+        setSessionForm({
+          sender_name: email.sender_name || "",
+          package_description: "",
+        });
+      }
+    } else {
+      setSessionModalMode("create");
+      setSessionForm({
+        sender_name: email.sender_name || "",
+        package_description: "",
+        sender_city: "",
+        recipient_city: "",
+      });
+    }
     setShowSessionModal(true);
   };
 
@@ -182,73 +302,18 @@ const Emails: React.FC = () => {
     return clean.substring(0, 120);
   };
 
-  // Group linear list of emails into Threads
-  const threads = useMemo(() => {
-    const threadMap: { [key: string]: Email[] } = {};
-
-    // 1. Filter Logic
-    const filteredList = emails.filter((email) => {
-      if (filter === "shipping")
-        return (
-          email.category === "shipping_request" || email.is_shipping_request
-        );
-      if (filter === "query")
-        return (
-          email.category === "logistics_inquiry" || email.category === "query"
-        );
-      if (filter === "spam")
-        return email.category === "spam" || email.status === "ignored";
-      return true; // "all"
-    });
-
-    // 2. Grouping Logic
-    filteredList.forEach((email) => {
-      // Use thread_id if available, otherwise treat message_id as key
-      const key =
-        email.thread_id && email.thread_id.trim() !== ""
-          ? email.thread_id
-          : `single_${email.message_id}`;
-      if (!threadMap[key]) threadMap[key] = [];
-      threadMap[key].push(email);
-    });
-
-    // 3. Sorting Messages within Threads
-    const result: EmailThread[] = Object.entries(threadMap).map(
-      ([threadId, threadEmails]) => {
-        // Sort oldest to newest for the Chat View
-        const sortedMessages = threadEmails.sort(
-          (a, b) =>
-            new Date(a.received_at).getTime() -
-            new Date(b.received_at).getTime()
-        );
-
-        return {
-          threadId,
-          emails: sortedMessages,
-          latestEmail: sortedMessages[sortedMessages.length - 1], // Newest is last in this sort array
-          firstEmail: sortedMessages[0],
-        };
-      }
-    );
-
-    // 4. Sort Threads by Newest Activity (Latest email timestamp)
-    return result.sort(
-      (a, b) =>
-        new Date(b.latestEmail.received_at).getTime() -
-        new Date(a.latestEmail.received_at).getTime()
-    );
-  }, [emails, filter]);
-
-  const toggleThread = (threadId: string) => {
-    setExpandedThreadId(expandedThreadId === threadId ? null : threadId);
-    setReplyText(""); // Clear draft when switching threads
+  const isQueryThread = (email: Email) => {
+    return email.category === "logistics_inquiry" || email.category === "query";
   };
 
   const getStatusColor = (status: string, category: string) => {
-    if (category === "spam") return "bg-gray-100 text-gray-500 border-gray-200";
+    // Check both category AND status
+    if (category === "spam" || status === "ignored")
+      return "bg-slate-100 text-slate-500 border-slate-200";
+
     switch (status) {
       case "completed":
-        return "bg-green-100 text-green-700 border-green-200";
+        return "bg-emerald-100 text-emerald-700 border-emerald-200";
       case "processing":
         return "bg-blue-100 text-blue-700 border-blue-200";
       case "failed":
@@ -256,7 +321,7 @@ const Emails: React.FC = () => {
       case "unprocessed":
         return "bg-amber-100 text-amber-700 border-amber-200";
       default:
-        return "bg-gray-100 text-gray-700 border-gray-200";
+        return "bg-slate-100 text-slate-700 border-slate-200";
     }
   };
 
@@ -270,38 +335,116 @@ const Emails: React.FC = () => {
     }).format(date);
   };
 
-  const isQueryThread = (email: Email) => {
-    return email.category === "logistics_inquiry" || email.category === "query";
+  // --- THREAD CONSTRUCTION ---
+  const threads = useMemo(() => {
+    const threadMap: { [key: string]: Email[] } = {};
+
+    // NO client-side filtering - backend already filtered by category
+    const filteredList = emails;
+
+    filteredList.forEach((email) => {
+      const key =
+        email.thread_id && email.thread_id.trim() !== ""
+          ? email.thread_id
+          : `single_${email.message_id}`;
+      if (!threadMap[key]) threadMap[key] = [];
+
+      // Add Main Email
+      threadMap[key].push(email);
+
+      // Add Nested Replies (Flatten them into the list so they appear in the UI)
+      if (email.responses && email.responses.length > 0) {
+        email.responses.forEach((response, idx) => {
+          // CRITICAL FIX: Use a unique ID that won't collide with real email IDs
+          const uniqueReplyId = `reply_${email.id}_${response.id}_${idx}`;
+
+          const replyAsEmail: Email = {
+            id: uniqueReplyId as any,
+            message_id: `reply_${response.id}`,
+            thread_id: email.thread_id,
+            sender_email: "support@yourcompany.com",
+            sender_name: "You",
+            subject: email.subject,
+            body: response.body,
+            category: email.category,
+            is_shipping_request: false,
+            status: "completed",
+            received_at: response.sent_at,
+            created_at: response.sent_at,
+            updated_at: response.sent_at,
+            is_reply: true,
+            is_forwarded: false,
+            responses: [],
+            __originalEmailId: email.id,
+          } as Email & { __originalEmailId?: number };
+
+          threadMap[key].push(replyAsEmail);
+        });
+      }
+    });
+
+    const result: EmailThread[] = Object.entries(threadMap).map(
+      ([threadId, threadEmails]) => {
+        // Sort DESCENDING (Newest First)
+        const sortedMessages = threadEmails.sort(
+          (a, b) =>
+            new Date(b.received_at).getTime() -
+            new Date(a.received_at).getTime()
+        );
+
+        const latestInteraction = sortedMessages[0];
+        const firstEmail = sortedMessages[sortedMessages.length - 1];
+
+        return {
+          threadId,
+          emails: sortedMessages,
+          latestEmail: latestInteraction,
+          firstEmail: firstEmail,
+        };
+      }
+    );
+
+    // Sort threads by newest activity
+    return result.sort(
+      (a, b) =>
+        new Date(b.latestEmail.received_at).getTime() -
+        new Date(a.latestEmail.received_at).getTime()
+    );
+  }, [emails]); // Removed 'filter' from dependencies since filtering is done server-side
+
+  const toggleThread = (threadId: string) => {
+    setExpandedThreadId(expandedThreadId === threadId ? null : threadId);
+    setReplyText("");
   };
 
-  // --- Render ---
+  // ==========================================
+  // 5. RENDER
+  // ==========================================
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-6">
-      {/* 1. Header Section */}
+    <div className="max-w-6xl mx-auto p-6 space-y-6 font-sans text-slate-900">
+      {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <Mail className="w-7 h-7 text-blue-600" />
+          <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
+            <div className="p-2 bg-slate-900 text-white rounded-lg">
+              <Mail size={24} />
+            </div>
             Inbox
           </h1>
-          <p className="text-gray-500 text-sm mt-1">
+          <p className="text-slate-500 text-sm mt-1">
             Manage incoming shipping requests and logistics inquiries
           </p>
         </div>
 
-        {/* Filter Tabs */}
-        <div className="flex items-center gap-2 bg-gray-100 p-1 rounded-lg border border-gray-200 overflow-x-auto">
+        <div className="flex items-center gap-1 bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
           {(["all", "shipping", "query", "spam"] as const).map((f) => (
             <button
               key={f}
-              onClick={() => {
-                setFilter(f);
-                setPage(1);
-              }}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition-all capitalize whitespace-nowrap ${
+              onClick={() => setFilter(f)}
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-all capitalize ${
                 filter === f
-                  ? "bg-white text-blue-600 shadow-sm"
-                  : "text-gray-600 hover:text-gray-900 hover:bg-gray-200/50"
+                  ? "bg-slate-900 text-white shadow-md"
+                  : "text-slate-500 hover:text-slate-900 hover:bg-slate-50"
               }`}
             >
               {f === "query" ? "Queries" : f}
@@ -310,261 +453,244 @@ const Emails: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. Main List Container */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden min-h-[500px] flex flex-col">
-        {/* Loading State */}
+      {/* Main List */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden min-h-[600px] flex flex-col">
+        {/* Table Header */}
+        <div className="grid grid-cols-12 gap-6 px-8 py-4 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-400 uppercase tracking-wider">
+          <div className="col-span-3">Sender Details</div>
+          <div className="col-span-6">Message Preview</div>
+          <div className="col-span-3 text-right">Status & Date</div>
+        </div>
+
         {loading && emails.length === 0 ? (
-          <div className="flex items-center justify-center flex-grow">
-            <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+          <div className="flex flex-col items-center justify-center flex-grow py-32 gap-4">
+            <div className="w-8 h-8 border-4 border-slate-200 border-t-blue-600 rounded-full animate-spin"></div>
+            <p className="text-slate-400 text-sm font-medium">
+              Syncing mailbox...
+            </p>
           </div>
         ) : threads.length === 0 ? (
-          /* Empty State */
-          <div className="flex flex-col items-center justify-center flex-grow py-20 px-4 text-center">
-            <div className="bg-gray-50 p-6 rounded-full mb-4">
-              <Search className="w-10 h-10 text-gray-400" />
+          <div className="flex flex-col items-center justify-center flex-grow py-32 px-4 text-center">
+            <div className="bg-slate-50 p-4 rounded-full mb-4 border border-slate-100">
+              <Search className="w-8 h-8 text-slate-300" strokeWidth={1.5} />
             </div>
-            <h3 className="text-lg font-semibold text-gray-900">
+            <h3 className="text-lg font-semibold text-slate-900">
               No emails found
             </h3>
-            <p className="text-gray-500 max-w-sm mt-2">
-              No emails matching current filter.
+            <p className="text-slate-500 mt-2">
+              Your inbox is empty for this category.
             </p>
           </div>
         ) : (
-          /* List of Threads */
-          <div className="divide-y divide-gray-100 flex-grow">
+          <div className="divide-y divide-slate-100 flex-grow">
             {threads.map((thread) => {
               const isExpanded = expandedThreadId === thread.threadId;
               const { latestEmail } = thread;
               const isQuery = isQueryThread(latestEmail);
+              const hasSession = (latestEmail as any).session_id;
 
               return (
                 <div
                   key={thread.threadId}
-                  className={`group transition-colors ${
-                    isExpanded ? "bg-slate-50" : "hover:bg-gray-50"
+                  className={`group transition-all duration-300 ${
+                    isExpanded
+                      ? "bg-slate-50/80 shadow-inner"
+                      : "hover:bg-slate-50"
                   }`}
                 >
-                  {/* Thread Summary Row (Clickable) */}
+                  {/* --- Thread Summary Row --- */}
                   <div
                     onClick={() => toggleThread(thread.threadId)}
-                    className="p-4 cursor-pointer grid grid-cols-12 gap-4 items-center"
+                    className="p-6 cursor-pointer grid grid-cols-12 gap-6 items-center relative"
                   >
-                    {/* Icon & Sender Info */}
-                    <div className="col-span-12 md:col-span-3 flex items-center gap-3 overflow-hidden">
+                    {/* Active Indicator */}
+                    {isExpanded && (
+                      <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-600 rounded-r-md"></div>
+                    )}
+
+                    {/* Sender */}
+                    <div className="col-span-12 md:col-span-3 flex items-center gap-4 overflow-hidden">
                       <div
-                        className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
+                        className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 shadow-sm border border-white ${
                           latestEmail.category === "spam"
-                            ? "bg-gray-200 text-gray-500"
+                            ? "bg-slate-200 text-slate-500"
                             : isQuery
-                            ? "bg-amber-100 text-amber-600"
+                            ? "bg-slate-100 text-slate-600"
                             : "bg-blue-100 text-blue-600"
                         }`}
                       >
                         {latestEmail.category === "spam" ? (
-                          <AlertCircle size={20} />
+                          <AlertCircle size={18} strokeWidth={2} />
                         ) : isQuery ? (
-                          <MessageSquare size={20} />
+                          <MessageSquare size={18} strokeWidth={2} />
                         ) : (
-                          <Package size={20} />
+                          <Package size={18} strokeWidth={2} />
                         )}
                       </div>
+
                       <div className="min-w-0">
                         <p
-                          className={`text-sm font-semibold truncate text-gray-900`}
+                          className={`text-sm font-bold truncate text-slate-900`}
                         >
                           {latestEmail.sender_name || latestEmail.sender_email}
                         </p>
-                        <p className="text-xs text-gray-500 truncate">
+                        <p className="text-xs text-slate-500 truncate font-medium mt-0.5">
                           {latestEmail.sender_email}
                         </p>
                       </div>
                     </div>
 
-                    {/* Subject & Body Preview */}
+                    {/* Preview */}
                     <div className="col-span-12 md:col-span-6 min-w-0">
-                      <div className="flex items-center gap-2 mb-0.5">
+                      <div className="flex items-center gap-2.5 mb-1.5">
+                        {thread.emails.length > 1 && (
+                          <span className="text-[10px] bg-slate-200 text-slate-700 px-1.5 rounded-md font-bold border border-slate-300">
+                            {thread.emails.length}
+                          </span>
+                        )}
                         <span
                           className={`text-sm truncate ${
                             latestEmail.status === "unprocessed"
-                              ? "font-bold text-gray-900"
-                              : "text-gray-700"
+                              ? "font-bold text-slate-900"
+                              : "text-slate-700"
                           }`}
                         >
                           {latestEmail.subject || "(No Subject)"}
                         </span>
-                        {thread.emails.length > 1 && (
-                          <span className="text-[10px] bg-slate-200 text-slate-700 px-1.5 rounded-full font-bold">
-                            {thread.emails.length}
+                        {hasSession && (
+                          <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 rounded-md font-bold border border-emerald-200 flex items-center gap-1">
+                            <CheckCircle2 size={10} /> #{hasSession}
                           </span>
                         )}
                       </div>
-                      <p className="text-sm text-gray-500 truncate pr-4">
-                        {getCleanPreview(latestEmail.body)}...
+                      <p className="text-sm text-slate-400 truncate pr-8 font-normal">
+                        {getCleanPreview(latestEmail.body)}
                       </p>
                     </div>
 
-                    {/* Status Badge & Timestamp */}
-                    <div className="col-span-12 md:col-span-3 flex items-center justify-between md:justify-end gap-4">
+                    {/* Status & Time */}
+                    <div className="col-span-12 md:col-span-3 flex items-center justify-between md:justify-end gap-6">
                       <span
-                        className={`px-2.5 py-1 rounded-full text-xs font-medium border ${getStatusColor(
+                        className={`px-3 py-1 rounded-full text-xs font-bold border ${getStatusColor(
                           latestEmail.status,
                           latestEmail.category as string
-                        )}`}
+                        )} uppercase tracking-wide`}
                       >
                         {latestEmail.category === "spam"
                           ? "Spam"
                           : latestEmail.status.replace("_", " ")}
                       </span>
-                      <div className="flex items-center gap-3 text-gray-400">
+                      <div className="flex items-center gap-4 text-slate-400">
                         <span className="text-xs font-medium">
                           {formatDate(latestEmail.received_at)}
                         </span>
                         {isExpanded ? (
-                          <ChevronUp size={16} />
+                          <ChevronUp size={18} className="text-blue-600" />
                         ) : (
-                          <ChevronDown size={16} />
+                          <ChevronDown
+                            size={18}
+                            className="group-hover:text-slate-600"
+                          />
                         )}
                       </div>
                     </div>
                   </div>
 
-                  {/* Expanded Thread View (Chat Style) */}
+                  {/* --- Expanded Thread View (Stacked Emails) --- */}
                   {isExpanded && (
-                    <div className="bg-slate-100 border-t border-gray-200 animate-in fade-in duration-200">
-                      {/* --- Sticky Header for Query Actions --- */}
+                    <div className="border-t border-slate-200 animate-in slide-in-from-top-2 duration-300 bg-slate-50/50">
+                      {/* 1. Action Header (Queries Only) */}
                       {isQuery && (
-                        <div className="sticky top-0 z-10 bg-white/95 backdrop-blur-sm px-4 py-3 border-b border-gray-200 flex justify-between items-center shadow-sm">
-                          <div className="flex items-center gap-2 text-sm text-gray-700">
-                            <span className="p-1.5 bg-amber-100 text-amber-600 rounded">
-                              <AlertCircle size={16} />
-                            </span>
+                        <div className="sticky top-0 z-20 bg-white/95 backdrop-blur-md px-8 py-4 border-b border-slate-200 flex justify-between items-center shadow-sm">
+                          <div className="flex items-center gap-3 text-sm">
+                            <div className="p-2 bg-slate-100 text-slate-600 rounded-lg">
+                              <MessageSquare size={18} />
+                            </div>
                             <div>
-                              <span className="font-bold block text-xs uppercase text-gray-500 tracking-wider">
-                                Status
+                              <span className="block text-xs font-bold text-slate-400 uppercase tracking-wider">
+                                Thread Type
                               </span>
-                              <span className="font-medium">
-                                Query / Inquiry
+                              <span className="font-bold text-slate-800">
+                                General Inquiry
                               </span>
                             </div>
                           </div>
+
                           <button
                             onClick={() => openSessionModal(latestEmail)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 bg-white text-gray-700 text-xs font-semibold rounded-md border border-gray-300 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 transition-all shadow-sm"
+                            className={`
+                                  flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-lg border transition-all shadow-sm
+                                  ${
+                                    hasSession
+                                      ? "bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 hover:border-emerald-300"
+                                      : "bg-slate-900 text-white border-transparent hover:bg-slate-800 hover:shadow-md"
+                                  }
+                                `}
                           >
-                            <Truck size={14} />
-                            Convert to Shipment
+                            {hasSession ? (
+                              <>
+                                <Truck size={14} /> Update Session #{hasSession}
+                              </>
+                            ) : (
+                              <>
+                                <Truck size={14} /> Convert to Shipment
+                              </>
+                            )}
                           </button>
                         </div>
                       )}
 
-                      {/* --- Scrollable Chat Area --- */}
-                      <div className="p-4 space-y-6 max-h-[500px] overflow-y-auto custom-scrollbar">
-                        <div className="flex items-center justify-center pb-2">
-                          <span className="text-[10px] uppercase font-bold text-gray-400 bg-white px-3 py-1 rounded-full border border-gray-100 shadow-sm">
-                            Conversation Started
-                          </span>
-                        </div>
-
-                        {thread.emails.map((msg) => {
-                          const isMe = msg.is_reply;
-                          return (
-                            <div
-                              key={msg.message_id}
-                              className={`flex ${
-                                isMe ? "justify-end" : "justify-start"
-                              }`}
-                            >
-                              <div
-                                className={`flex flex-col max-w-[85%] md:max-w-[70%] ${
-                                  isMe ? "items-end" : "items-start"
-                                }`}
-                              >
-                                <div className="flex items-center gap-2 mb-1 px-1">
-                                  <span className="text-xs font-semibold text-gray-600">
-                                    {isMe
-                                      ? "You"
-                                      : msg.sender_name || msg.sender_email}
-                                  </span>
-                                  <span className="text-[10px] text-gray-400">
-                                    {formatDate(msg.received_at)}
-                                  </span>
-                                </div>
-
-                                <div
-                                  className={`
-                                            p-3.5 rounded-2xl shadow-sm text-sm whitespace-pre-wrap leading-relaxed border relative group
-                                            ${
-                                              isMe
-                                                ? "bg-blue-600 text-white border-blue-600 rounded-tr-sm"
-                                                : "bg-white text-gray-800 border-gray-200 rounded-tl-sm"
-                                            }
-                                        `}
-                                >
-                                  {msg.body}
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                        {/* Invisible element to auto-scroll to */}
-                        <div ref={messagesEndRef} />
-                      </div>
-
-                      {/* --- Sticky Reply Box (Bottom) --- */}
-                      {latestEmail.category !== "spam" && (
-                        <div className="p-4 bg-white border-t border-gray-200 sticky bottom-0 z-10">
-                          <div className="relative rounded-xl border border-gray-300 shadow-sm bg-white focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all">
-                            {/* Reply Toolbar */}
-                            <div className="bg-gray-50/50 border-b border-gray-100 px-3 py-2 flex items-center justify-between">
-                              <span className="text-xs font-semibold text-gray-500 flex items-center gap-1.5">
-                                <CornerDownRight
-                                  size={14}
-                                  className="text-gray-400"
-                                />
-                                Reply to {latestEmail.sender_name || "Customer"}
+                      {/* 2. Reply Box (Sticky at TOP for Queries) */}
+                      {isQuery && (
+                        <div className="p-6 bg-white border-b border-slate-200">
+                          <div className="relative rounded-xl border border-slate-300 bg-white focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all shadow-sm">
+                            <div className="px-4 py-2.5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 rounded-t-xl">
+                              <span className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
+                                <CornerDownRight size={14} /> Reply to{" "}
+                                {latestEmail.sender_name || "Customer"}
                               </span>
-                              <div className="flex gap-1">
-                                <button className="p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-200/50 transition-colors">
-                                  <Paperclip size={14} />
-                                </button>
-                                <button className="p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-200/50 transition-colors">
-                                  <MoreHorizontal size={14} />
-                                </button>
-                              </div>
+                              <MoreHorizontal
+                                size={16}
+                                className="text-slate-400 cursor-pointer hover:text-slate-600"
+                              />
                             </div>
-
-                            {/* Text Area */}
                             <textarea
+                              ref={replyBoxRef}
                               value={replyText}
                               onChange={(e) => setReplyText(e.target.value)}
-                              placeholder="Write your reply here..."
-                              rows={3}
-                              className="w-full text-sm text-gray-800 placeholder-gray-400 border-none resize-none focus:ring-0 p-3 bg-transparent"
+                              placeholder="Type your response..."
+                              rows={4}
+                              className="w-full text-sm text-slate-800 placeholder-slate-400 border-none resize-none focus:ring-0 p-4 bg-transparent leading-relaxed"
+                              autoComplete="off"
+                              spellCheck="false"
+                              data-gramm="false"
+                              data-gramm_editor="false"
+                              data-enable-grammarly="false"
+                              data-lpignore="true"
+                              data-form-type="other"
                             />
-
-                            {/* Send Button */}
-                            <div className="px-3 py-2 bg-white flex justify-end items-center">
+                            <div className="px-4 py-3 bg-white rounded-b-xl flex justify-end border-t border-slate-50">
                               <button
                                 onClick={() => handleSendReply(latestEmail)}
                                 disabled={!replyText.trim() || sendingReply}
                                 className={`
-                                            flex items-center gap-2 px-4 py-1.5 text-sm font-semibold rounded-lg transition-all shadow-sm
+                                            flex items-center gap-2 px-6 py-2 text-sm font-bold rounded-lg transition-all shadow-sm
                                             ${
                                               !replyText.trim() || sendingReply
-                                                ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                                                : "bg-blue-600 text-white hover:bg-blue-700 hover:shadow-md active:transform active:scale-95"
+                                                ? "bg-slate-100 text-slate-400 cursor-not-allowed"
+                                                : "bg-slate-900 text-white hover:bg-black hover:shadow-md hover:-translate-y-0.5"
                                             }
-                                        `}
+                                          `}
                               >
                                 {sendingReply ? (
                                   <>
                                     <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                                    Sending
+                                    Sending...
                                   </>
                                 ) : (
                                   <>
-                                    Send <Send size={14} />
+                                    Send Reply{" "}
+                                    <Send size={14} strokeWidth={2.5} />
                                   </>
                                 )}
                               </button>
@@ -572,6 +698,70 @@ const Emails: React.FC = () => {
                           </div>
                         </div>
                       )}
+
+                      {/* 3. Message List (Stacked) */}
+                      <div className="p-8 space-y-8 relative">
+                        {/* Timeline Spine */}
+                        <div className="absolute left-[47px] top-8 bottom-8 w-0.5 bg-slate-200 z-0"></div>
+
+                        {thread.emails.map((msg) => {
+                          const isMe = msg.is_reply;
+                          const messageKey =
+                            msg.message_id || `email_${msg.id}`;
+
+                          return (
+                            <div
+                              key={messageKey}
+                              className="relative pl-10 z-10 group/msg"
+                            >
+                              {/* Avatar */}
+                              <div
+                                className={`absolute left-0 top-0 w-10 h-10 rounded-full flex items-center justify-center border-2 transition-colors ${
+                                  isMe
+                                    ? "bg-blue-600 border-white text-white shadow-sm"
+                                    : "bg-white border-slate-200 text-slate-500"
+                                }`}
+                              >
+                                <User size={16} strokeWidth={2.5} />
+                              </div>
+
+                              <div
+                                className={`rounded-2xl border p-6 transition-all duration-200 ${
+                                  isMe
+                                    ? "bg-blue-50/40 border-blue-100"
+                                    : "bg-white border-slate-200 shadow-sm"
+                                }`}
+                              >
+                                {/* Email Header */}
+                                <div className="flex items-start justify-between mb-4 pb-4 border-b border-slate-100/80">
+                                  <div>
+                                    <div className="flex items-center gap-2.5">
+                                      <span className="text-sm font-bold text-slate-900">
+                                        {isMe
+                                          ? "You (Support Team)"
+                                          : msg.sender_name || msg.sender_email}
+                                      </span>
+                                      {isMe && (
+                                        <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-md font-bold tracking-wide uppercase border border-blue-200">
+                                          Staff Reply
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-xs text-slate-400 font-medium mt-1">
+                                      {formatDate(msg.received_at)}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Email Body */}
+                                <div className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed font-sans pl-14">
+                                  {msg.body}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -580,84 +770,86 @@ const Emails: React.FC = () => {
           </div>
         )}
 
-        {/* 3. Pagination Footer */}
-        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex flex-col md:flex-row items-center justify-between gap-4 mt-auto">
-          <div className="text-sm text-gray-600">
-            Showing Page <span className="font-medium">{page}</span>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="flex gap-2">
-              <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page === 1}
-                className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
-              >
-                Previous
-              </button>
-              <button
-                onClick={() => setPage((p) => p + 1)}
-                disabled={emails.length < pageSize}
-                className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
-              >
-                Next
-              </button>
-            </div>
-
-            <div className="hidden md:block h-4 w-px bg-gray-300 mx-2"></div>
-            <select
-              value={pageSize}
-              onChange={(e) => setPageSize(Number(e.target.value))}
-              className="hidden md:block text-sm border border-gray-300 rounded px-2 py-1 outline-none focus:border-blue-500"
+        {/* Pagination */}
+        <div className="px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-between items-center mt-auto">
+          <span className="text-sm font-medium text-slate-500">
+            Page {page}
+          </span>
+          <div className="flex gap-3">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page === 1}
+              className="px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm font-bold text-slate-600 disabled:opacity-50 hover:bg-slate-100 transition-colors shadow-sm"
             >
-              <option value={20}>20 / page</option>
-              <option value={50}>50 / page</option>
-              <option value={100}>100 / page</option>
-            </select>
+              Previous
+            </button>
+            <button
+              onClick={() => setPage((p) => p + 1)}
+              disabled={emails.length < pageSize}
+              className="px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm font-bold text-slate-600 disabled:opacity-50 hover:bg-slate-100 transition-colors shadow-sm"
+            >
+              Next
+            </button>
           </div>
         </div>
       </div>
 
-      {/* 4. Manual Session Creation Modal */}
+      {/* Manual Session Modal */}
       {showSessionModal && (
-        <div className="fixed inset-0 bg-gray-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto transform transition-all scale-100">
-            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white z-10">
-              <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-                <div className="p-1.5 bg-blue-50 rounded-lg text-blue-600">
-                  <Truck size={20} />
-                </div>
-                Convert Query to Shipment
-              </h3>
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto transform transition-all scale-100 border border-slate-200">
+            <div className="px-8 py-6 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white/95 backdrop-blur z-10">
+              <div>
+                <h3 className="text-xl font-black text-slate-900 flex items-center gap-3">
+                  <div className="p-2 bg-blue-50 rounded-xl text-blue-600">
+                    <Truck size={24} strokeWidth={2} />
+                  </div>
+                  {sessionModalMode === "update"
+                    ? "Update Existing Session"
+                    : "Create Shipment Session"}
+                </h3>
+                <p className="text-sm text-slate-500 mt-1 ml-12">
+                  {sessionModalMode === "update"
+                    ? "Modify details for the existing shipment linked to this thread."
+                    : "Convert this inquiry into a new trackable shipment."}
+                </p>
+              </div>
               <button
                 onClick={() => setShowSessionModal(false)}
-                className="text-gray-400 hover:text-gray-600 p-1.5 rounded-full hover:bg-gray-100 transition-colors"
+                className="text-slate-400 hover:text-slate-700 p-2 rounded-full hover:bg-slate-100 transition-colors"
               >
-                <X size={20} />
+                <X size={24} />
               </button>
             </div>
 
-            <div className="p-6 space-y-6">
-              <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 flex items-start gap-3">
-                <AlertCircle
-                  className="text-blue-600 mt-0.5 flex-shrink-0"
-                  size={18}
+            <div className="p-8 space-y-8">
+              <div className="bg-blue-50 p-5 rounded-xl border border-blue-100 flex items-start gap-4">
+                <FileText
+                  className="text-blue-600 mt-1 flex-shrink-0"
+                  size={20}
                 />
-                <p className="text-sm text-blue-800 leading-relaxed">
-                  <strong>Agent Action Required:</strong> Review the email
-                  content and manually extract the shipment details below. This
-                  will create a formal session in the system.
-                </p>
+                <div>
+                  <p className="text-sm text-blue-900 font-semibold mb-1">
+                    Agent Instruction
+                  </p>
+                  <p className="text-sm text-blue-800 leading-relaxed">
+                    Review the email thread and manually extract key shipment
+                    details.
+                    {sessionModalMode === "update"
+                      ? " Updating this form will modify the active session."
+                      : " Submitting this form will initialize a new workflow."}
+                  </p>
+                </div>
               </div>
 
-              {/* Manual Entry Form */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">
                     Sender Name
                   </label>
                   <input
                     type="text"
-                    className="w-full border border-gray-200 bg-gray-50 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:bg-white outline-none transition-all"
+                    className="w-full border border-slate-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all shadow-sm"
                     placeholder="E.g. John Doe"
                     value={sessionForm.sender_name || ""}
                     onChange={(e) =>
@@ -668,13 +860,13 @@ const Emails: React.FC = () => {
                     }
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">
                     Recipient Name
                   </label>
                   <input
                     type="text"
-                    className="w-full border border-gray-200 bg-gray-50 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:bg-white outline-none transition-all"
+                    className="w-full border border-slate-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all shadow-sm"
                     placeholder="E.g. Acme Corp"
                     value={sessionForm.recipient_name || ""}
                     onChange={(e) =>
@@ -685,13 +877,13 @@ const Emails: React.FC = () => {
                     }
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">
                     Origin City
                   </label>
                   <input
                     type="text"
-                    className="w-full border border-gray-200 bg-gray-50 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:bg-white outline-none transition-all"
+                    className="w-full border border-slate-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all shadow-sm"
                     placeholder="E.g. New York"
                     value={sessionForm.sender_city || ""}
                     onChange={(e) =>
@@ -702,13 +894,13 @@ const Emails: React.FC = () => {
                     }
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">
                     Destination City
                   </label>
                   <input
                     type="text"
-                    className="w-full border border-gray-200 bg-gray-50 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:bg-white outline-none transition-all"
+                    className="w-full border border-slate-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all shadow-sm"
                     placeholder="E.g. London"
                     value={sessionForm.recipient_city || ""}
                     onChange={(e) =>
@@ -719,13 +911,12 @@ const Emails: React.FC = () => {
                     }
                   />
                 </div>
-                <div className="col-span-1 md:col-span-2 space-y-1.5">
-                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
+                <div className="col-span-1 md:col-span-2 space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">
                     Package Description
                   </label>
                   <textarea
-                    className="w-full border border-gray-200 bg-gray-50 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:bg-white outline-none transition-all"
-                    rows={3}
+                    className="w-full border border-slate-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all shadow-sm min-h-[120px]"
                     placeholder="E.g. 5 boxes of electronics, 50kg total. Needs temperature control."
                     value={sessionForm.package_description || ""}
                     onChange={(e) =>
@@ -739,26 +930,29 @@ const Emails: React.FC = () => {
               </div>
             </div>
 
-            <div className="px-6 py-4 bg-gray-50 flex justify-end gap-3 border-t border-gray-100">
+            <div className="px-8 py-6 bg-slate-50 flex justify-end gap-3 border-t border-slate-200">
               <button
                 onClick={() => setShowSessionModal(false)}
-                className="px-4 py-2 text-sm text-gray-700 font-semibold hover:bg-gray-200 rounded-lg transition-colors border border-gray-300 bg-white shadow-sm"
+                className="px-6 py-2.5 text-sm text-slate-700 font-bold hover:bg-slate-200 rounded-lg border border-slate-300 bg-white shadow-sm transition-all"
               >
                 Cancel
               </button>
               <button
-                onClick={handleCreateSession}
-                disabled={creatingSession || !sessionForm.package_description}
-                className="px-5 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 shadow-md hover:shadow-lg transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
+                onClick={handleSaveSession}
+                disabled={isSavingSession || !sessionForm.package_description}
+                className="px-8 py-2.5 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700 shadow-md hover:shadow-lg flex items-center gap-2 disabled:opacity-50 disabled:shadow-none transition-all"
               >
-                {creatingSession ? (
+                {isSavingSession ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                    Creating...
+                    Saving...
                   </>
                 ) : (
                   <>
-                    <CheckCircle2 size={16} strokeWidth={2.5} /> Confirm Session
+                    <CheckCircle2 size={18} strokeWidth={2.5} />{" "}
+                    {sessionModalMode === "create"
+                      ? "Confirm & Create"
+                      : "Update Session"}
                   </>
                 )}
               </button>

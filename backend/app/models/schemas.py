@@ -4,11 +4,15 @@ from datetime import datetime
 from enum import Enum
 
 
+# ==========================================
+# 1. ENUMS
+# ==========================================
+
 class EmailCategoryEnum(str, Enum):
     SHIPPING_REQUEST = "shipping_request"
-    QUERY = "query"          # General questions
-    SPAM = "spam"            # Junk/Marketing
-    LOGISTICS_INQUIRY = "logistics_inquiry" # Legacy/Specific inquiry
+    LOGISTICS_INQUIRY = "logistics_inquiry"
+    QUERY = "query"
+    SPAM = "spam"
     OTHER = "other"
 
 
@@ -17,7 +21,6 @@ class ShipmentStatusEnum(str, Enum):
     PENDING_INFO = "pending_info"
     COMPLETE = "complete"
     CREATED = "created"
-    # Additional statuses for frontend compatibility
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
@@ -32,7 +35,7 @@ class EmailStatusEnum(str, Enum):
     COMPLETED = "completed"
     UNPROCESSED = "unprocessed"
     FAILED = "failed"
-    IGNORED = "ignored" # Used for Spam
+    IGNORED = "IGNORED"
 
 
 class VendorTypeEnum(str, Enum):
@@ -43,7 +46,9 @@ class VendorTypeEnum(str, Enum):
     WAREHOUSE = "warehouse"
 
 
-# --- AI / LLM SPECIFIC MODELS (Used by Agents) ---
+# ==========================================
+# 2. AI / LLM SPECIFIC MODELS
+# ==========================================
 
 class EmailClassification(BaseModel):
     """Schema for email classification results"""
@@ -57,7 +62,7 @@ class ExtractedShipmentInfo(BaseModel):
     """Schema for extracted shipment information - Used by AI Agent"""
     
     # Sender / Origin
-    sender_name: Optional[str] = Field(None, description="Name of the original requester/sender (look for signature in forwarded emails)")
+    sender_name: Optional[str] = Field(None, description="Name of the original requester/sender")
     sender_address: Optional[str] = Field(None, description="Full origin address if available")
     sender_city: Optional[str] = Field(None, description="Origin City (Map airport codes like IST to Istanbul)")
     sender_state: Optional[str] = Field(None, description="Origin State/Province")
@@ -77,7 +82,7 @@ class ExtractedShipmentInfo(BaseModel):
     # Package Details
     package_weight: Optional[str] = Field(None, description="Weight with units (e.g. 500kg)")
     package_dimensions: Optional[str] = Field(None, description="Dimensions with units (e.g. 10x10x10 cm)")
-    package_description: Optional[str] = Field(None, description="Combined description: Commodity + Container Type + Temperature (e.g. '20ft Reefer, Chestnuts, 7C')")
+    package_description: Optional[str] = Field(None, description="Combined description: Commodity + Container Type + Temperature")
     package_value: Optional[str] = Field(None, description="Declared value of goods")
     
     # Service Details
@@ -93,7 +98,9 @@ class MissingInfoResponse(BaseModel):
     extracted_info: Dict[str, Any]
 
 
-# --- API / DB MODELS (Used by API & Frontend) ---
+# ==========================================
+# 3. API / DB MODELS
+# ==========================================
 
 class EmailBase(BaseModel):
     message_id: str
@@ -106,6 +113,24 @@ class EmailCreate(EmailBase):
     thread_id: Optional[str] = None
     sender_name: Optional[str] = None
     received_at: datetime
+
+
+# --- Schema for nested replies (Used inside EmailResponse) ---
+class EmailReplySchema(BaseModel):
+    id: int
+    body: str
+    sent_at: datetime
+    
+    @field_serializer('id', when_used='json')
+    def serialize_id(self, value: int) -> str:
+        return str(value)
+        
+    @field_serializer('sent_at', when_used='json')
+    def serialize_datetime(self, value: datetime) -> str:
+        return value.isoformat()
+
+    class Config:
+        from_attributes = True
 
 
 class EmailResponse(EmailBase):
@@ -122,6 +147,9 @@ class EmailResponse(EmailBase):
     extracted_data: Optional[Dict[str, Any]] = None
     session_id: Optional[int] = None
     
+    # --- The critical field for chat history ---
+    responses: List[EmailReplySchema] = []
+    
     @field_serializer('id', 'session_id', when_used='json')
     def serialize_ids(self, value: Optional[int]) -> Optional[str]:
         return str(value) if value is not None else None
@@ -133,7 +161,6 @@ class EmailResponse(EmailBase):
     class Config:
         from_attributes = True
         populate_by_name = True
-        # Alias mapping for frontend compatibility
         fields = {
             'sender_email': {'alias': 'senderEmail'},
             'sender_name': {'alias': 'sender'},
@@ -214,7 +241,6 @@ class ShipmentSessionResponse(ShipmentSessionBase):
     class Config:
         from_attributes = True
         populate_by_name = True
-        # Alias mapping for frontend compatibility
         fields = {
             'id': {'alias': 'sessionId'},
             'email_id': {'alias': 'emailId'},
@@ -238,7 +264,10 @@ class ShipmentSessionResponse(ShipmentSessionBase):
         }
 
 
-# Vendor Schemas
+# ==========================================
+# 4. VENDOR SCHEMAS
+# ==========================================
+
 class VendorBase(BaseModel):
     name: str
     email: EmailStr

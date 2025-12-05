@@ -2,7 +2,9 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 import re
-
+from langchain_openai import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate
+from sqlalchemy.orm import selectinload
 from app.models.models import (
     Email, ShipmentSession, EmailResponse, AgentLog, Vendor,
     EmailStatus, EmailCategory, ShipmentStatus
@@ -21,19 +23,48 @@ class EmailService:
         self.db = db
         self.email_service = smtp_service
         self.query_service = QueryService(db)
+        # Initialize LLM here for smart field merging operations
+        self.llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0.0, # Keep it strict and factual for data merging
+            api_key=settings.openai_api_key
+        )
     
-    def get_all_emails(self, skip: int = 0, limit: int = 100) -> List[Email]:
+    def get_all_emails(self, category: Optional[str] = None, skip: int = 0, limit: int = 100) -> List[Email]:
         """
         Get all emails sorted by NEWEST first.
+        Optionally filter by category.
         """
+        
+        query = self.db.query(Email).options(selectinload(Email.responses))
+        
+        # Apply category filter if provided
+        if category:
+            # FIX: Ensure we only compare against valid Enum values, not raw strings
+            
+            if category == "shipping":
+                query = query.filter(
+                    (Email.category == EmailCategory.SHIPPING_REQUEST) | 
+                    (Email.is_shipping_request == True)
+                )
+            elif category == "query":
+                # FIXED HERE: Removed 'OR Email.category == "query"' to prevent DataError
+                query = query.filter(Email.category == EmailCategory.LOGISTICS_INQUIRY)
+                
+            elif category == "spam":
+                query = query.filter(
+                    (Email.category == EmailCategory.SPAM) |
+                    (Email.status == EmailStatus.IGNORED)
+                )
+            # "all" or any other value = no filter
+    
         return (
-            self.db.query(Email)
+            query
             .order_by(Email.received_at.desc())
             .offset(skip)
             .limit(limit)
             .all()
         )
-
     def find_related_emails_by_thread(self, thread_id: str) -> List[Email]:
         """Find all emails in the same thread"""
         return self.db.query(Email).filter(Email.thread_id == thread_id).all()
@@ -232,7 +263,7 @@ class EmailService:
             
             # 1. SPAM
             if category_str == "spam":
-                email.category = EmailCategory.OTHER # Or dedicated SPAM enum if available
+                email.category = EmailCategory.SPAM # Or dedicated SPAM enum if available
                 email.status = EmailStatus.IGNORED
                 email.is_shipping_request = False
                 print(f"[ROUTER] Email #{email.id} classified as SPAM. Ignoring.", flush=True)
@@ -299,6 +330,35 @@ class EmailService:
                 "error": str(e)
             }
 
+    def _refine_package_description(self, current_desc: str, new_info: str) -> str:
+        """
+        Uses AI to intelligently merge package descriptions.
+        This fixes the 'Dumb Append' issue by understanding context.
+        """
+        try:
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are a logistics data cleaning agent.
+                Your job is to merge a 'Current Description' and 'New Information' into a single, clean, professional package description.
+                
+                Rules:
+                1. Remove redundant or duplicate information (e.g. "20' Reefer" and "20 ft container" -> "20' Reefer").
+                2. Consolidate items into a clean list.
+                3. Keep specific quantities (e.g. "1kg Dates").
+                4. Maintain temperature requirements if mentioned.
+                5. Output ONLY the final string. No explanations.
+                """),
+                ("human", f"Current Description: {current_desc}\nNew Information: {new_info}\n\nMerged Description:")
+            ])
+            
+            # Invoke LLM synchronously since we are in a sync context wrapper or async
+            # Since this method is called from synchronous flow mostly, we use invoke()
+            response = self.llm.invoke(prompt.format())
+            return response.content.strip()
+        except Exception as e:
+            print(f"[AI REFINE ERROR] {e}")
+            # Fallback: simple append if AI fails
+            return f"{current_desc} + {new_info}"
+
     def _handle_shipping_request(self, email: Email, result: Dict[str, Any]):
         """Helper to handle the creation/update logic for shipping requests"""
         
@@ -346,17 +406,26 @@ class EmailService:
         """Update existing shipment with new information from forwarded/reply emails"""
         extracted = result.get('extracted_info', {})
         
-        # Update fields logic: Append descriptions, overwrite others
         for field, value in extracted.items():
             if value:
                 current_value = getattr(shipment, field, None)
                 
                 if field == 'package_description' and current_value:
+                    # --- SMART AI MERGE ---
+                    # Only call AI if the new value adds something new
                     if value.lower() not in current_value.lower():
-                        new_desc = f"{current_value} + {value}"
-                        setattr(shipment, field, new_desc)
-                        print(f"[SHIPMENT UPDATE] Appended {field}: {new_desc}", flush=True)
-                else:
+                        refined_desc = self._refine_package_description(current_value, value)
+                        setattr(shipment, field, refined_desc)
+                        print(f"[SHIPMENT UPDATE] Refined {field}: {refined_desc}", flush=True)
+                
+                elif field in ['sender_city', 'sender_address', 'sender_country', 'sender_name',
+                                'recipient_city', 'recipient_address', 'recipient_country', 'recipient_name'] and current_value:
+                         # Protect existing location info from being overwritten by subject line parsing
+                         print(f"[SESSION PROTECT] Keeping existing {field}: {current_value}. Ignoring new value: {value}", flush=True)
+                         pass
+                
+                elif value != current_value:
+                    # Default update behavior for other fields
                     setattr(shipment, field, value)
                     print(f"[SHIPMENT UPDATE] Updated {field} with value: {value}", flush=True)
         
@@ -712,53 +781,7 @@ class EmailService:
             newly_extracted = {**simple_extracted, **agent_extracted}
             
             # Merge with existing session data (WITH PROTECTION LOGIC)
-            for field in ['sender_name', 'sender_address', 'sender_city', 'sender_state', 
-                          'sender_zipcode', 'sender_country', 'sender_phone',
-                          'recipient_name', 'recipient_address', 'recipient_city', 
-                          'recipient_state', 'recipient_zipcode', 'recipient_country', 
-                          'recipient_phone', 'package_description', 'package_weight',
-                          'package_dimensions', 'package_value', 'service_type']:
-                
-                current = getattr(session, field, None)
-                new = newly_extracted.get(field)
-                
-                if new:
-                    # 1. Package Description: Append
-                    if field == 'package_description' and current:
-                        if new.lower() not in current.lower():
-                            updated_desc = f"{current} + {new}"
-                            setattr(session, field, updated_desc)
-                            print(f"[SESSION UPDATE] Appended to {field}: {updated_desc}", flush=True)
-                    
-                    # 2. PROTECT Location/Contact Info: Do NOT overwrite if existing
-                    elif field in ['sender_city', 'sender_address', 'sender_country', 'sender_name',
-                                   'recipient_city', 'recipient_address', 'recipient_country', 'recipient_name'] and current:
-                         print(f"[SESSION PROTECT] Keeping existing {field}: {current}. Ignoring new value: {new}", flush=True)
-                         pass
-                    
-                    # 3. Update everything else (or if current is empty)
-                    elif new != current:
-                        setattr(session, field, new)
-                        print(f"[SESSION UPDATE] Updated {field} with new value", flush=True)
-            
-            # Recalculate missing fields
-            required_fields = ['package_description']
-            if not (session.sender_city or session.sender_address): required_fields.append('sender_city')
-            if not (session.recipient_city or session.recipient_address): required_fields.append('recipient_city')
-            
-            actual_missing = [f for f in required_fields if not getattr(session, f, None)]
-            session.missing_fields = actual_missing
-            
-            print(f"[MISSING INFO] Updated session #{session.id}, still missing: {actual_missing}", flush=True)
-            
-            # Update status if complete
-            if not actual_missing:
-                session.status = ShipmentStatus.COMPLETE
-                session.completed_at = datetime.now()
-                print(f"[MISSING INFO] Session #{session.id} is now complete!", flush=True)
-            
-            session.updated_at = datetime.now()
-            session.missing_info_updated_at = datetime.now()
+            self._update_existing_shipment(session, {"extracted_info": newly_extracted})
             
             email.category = EmailCategory.SHIPPING_REQUEST
             email.is_shipping_request = True
@@ -766,6 +789,7 @@ class EmailService:
             email.processed_at = datetime.now()
             
             # Send response
+            actual_missing = session.missing_fields
             if session.status == ShipmentStatus.COMPLETE:
                 # Custom message if we just appended new items
                 if newly_extracted.get('package_description') and " + " in str(getattr(session, 'package_description', '')):

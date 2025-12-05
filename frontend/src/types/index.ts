@@ -1,4 +1,7 @@
-// Vendor Types
+// ==========================================
+// VENDOR TYPES
+// ==========================================
+
 export interface Vendor {
   id: number;
   name: string;
@@ -14,7 +17,10 @@ export interface Vendor {
   updated_at: string;
 }
 
-// Shipment Session Types
+// ==========================================
+// SHIPMENT SESSION TYPES
+// ==========================================
+
 export interface ShipmentSession {
   id: number;
   email_id: number;
@@ -96,7 +102,17 @@ export interface ShipmentSessionCreate {
   [key: string]: any; // Allow dynamic fields if needed
 }
 
-// Email Types
+// ==========================================
+// EMAIL TYPES
+// ==========================================
+
+// Represents a nested reply inside an email thread (fetched from backend)
+export interface EmailReply {
+  id: string; // IDs are serialized as strings in JSON
+  body: string;
+  sent_at: string;
+}
+
 export interface Email {
   id: number;
   message_id: string;
@@ -127,14 +143,17 @@ export interface Email {
 
   // Threading Metadata
   is_forwarded?: boolean;
-  is_reply?: boolean;
+  is_reply?: boolean; // Used for UI styling (Blue bubble vs Gray bubble)
+
+  // Nested Replies (Critical for Chat History persistence)
+  responses?: EmailReply[];
 
   received_at: string;
   created_at: string;
   updated_at: string;
 }
 
-// Email Response (for logs)
+// Email Response (for logs/API calls)
 export interface EmailResponse {
   id: string;
   emailId: string;
@@ -143,7 +162,10 @@ export interface EmailResponse {
   status: "sent" | "failed";
 }
 
-// Dashboard Statistics
+// ==========================================
+// DASHBOARD & UI TYPES
+// ==========================================
+
 export interface DashboardStats {
   total_emails: number;
   shipping_requests: number;
@@ -153,7 +175,7 @@ export interface DashboardStats {
   vendor_replied_sessions: number;
 }
 
-// Frontend Helper for Threading View
+// Helper interface for Frontend Thread Grouping
 export interface EmailThread {
   threadId: string;
   emails: Email[];

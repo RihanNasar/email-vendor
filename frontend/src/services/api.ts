@@ -16,7 +16,9 @@ const api = axios.create({
   },
 });
 
-// Vendors API
+// ==========================================
+// VENDORS API
+// ==========================================
 export const vendorsApi = {
   getAll: (vendorType?: string, active?: boolean) =>
     api.get<Vendor[]>("/vendors", {
@@ -39,7 +41,9 @@ export const vendorsApi = {
     }),
 };
 
-// Sessions API
+// ==========================================
+// SESSIONS API
+// ==========================================
 export const sessionsApi = {
   getAll: (
     status?: string,
@@ -53,7 +57,7 @@ export const sessionsApi = {
 
   getById: (id: number) => api.get<ShipmentSession>(`/sessions/${id}`),
 
-  // ADDED: Create a session manually (used in converting queries)
+  // Create a session manually (used in converting queries)
   create: (data: ShipmentSessionCreate) =>
     api.post<ShipmentSession>("/sessions/", data),
 
@@ -64,22 +68,25 @@ export const sessionsApi = {
     api.put(`/sessions/${sessionId}/status`, { status }),
 };
 
-// Emails API
+// ==========================================
+// EMAILS API
+// ==========================================
 export const emailsApi = {
+  // FIXED: Changed to use 'category' parameter instead of 'is_shipping_request'
   getAll: (
-    isShippingRequest?: boolean,
+    category?: string, // Changed parameter name
     limit: number = 20,
     offset: number = 0
   ) =>
     api.get<Email[]>("/emails/", {
-      params: { is_shipping_request: isShippingRequest, limit, offset },
+      params: { category, limit, offset }, // Changed to 'category'
     }),
 
   getById: (id: number) => api.get<Email>(`/emails/${id}`),
 
-  // ADDED: Reply to an email
+  // UPDATED: Now includes `email?: Email` in the response type definition
   reply: (emailId: number, content: string) =>
-    api.post<{ success: boolean; messageId?: string }>(
+    api.post<{ success: boolean; messageId?: string; email?: Email }>(
       `/emails/${emailId}/reply`,
       { content }
     ),
@@ -88,7 +95,9 @@ export const emailsApi = {
     api.post<{ processed: number; emails: Email[] }>("/emails/process"),
 };
 
-// Dashboard API
+// ==========================================
+// DASHBOARD API
+// ==========================================
 export const dashboardApi = {
   getStats: () => api.get<DashboardStats>("/dashboard/stats"),
 };

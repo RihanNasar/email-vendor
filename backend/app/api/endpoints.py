@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Body
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Body, Query
+from sqlalchemy.orm import Session, selectinload
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
@@ -21,20 +21,30 @@ from app.services.email_service import EmailService
 
 router = APIRouter()
 
-# --- Helper Models ---
+# ==========================================
+# 1. HELPER MODELS
+# ==========================================
+
 class EmailReplyRequest(BaseModel):
     content: str
 
 class SessionStatusUpdate(BaseModel):
     status: str
 
-# --- Helper Functions ---
+# ==========================================
+# 2. HELPER FUNCTIONS
+# ==========================================
+
+def get_email_service(db: Session = Depends(get_db)) -> EmailService:
+    """Dependency for Email service"""
+    return EmailService(db)
 
 def _generate_vendor_notification(session: ShipmentSession, vendor: Vendor) -> str:
     """Generate a casual, human-like notification email for vendor"""
     
     # Build the message casually
-    message = f"Hey {vendor.name.split()[0] if vendor.name else 'there'},\n\n"
+    vendor_name = vendor.name.split()[0] if vendor.name else 'there'
+    message = f"Hey {vendor_name},\n\n"
     message += f"Just wanted to give you a heads up - we've got a new shipment booking (#{session.id}) that needs your attention.\n\n"
     
     message += "Here's what we're working with:\n\n"
@@ -64,6 +74,12 @@ def _generate_vendor_notification(session: ShipmentSession, vendor: Vendor) -> s
     if session.service_type:
         message += f"Service: {session.service_type}\n"
     
+    if session.pickup_date:
+        message += f"Pickup Date: {session.pickup_date}\n"
+
+    if session.delivery_date:
+        message += f"Delivery Date: {session.delivery_date}\n"
+    
     message += f"\n"
     
     # Closing
@@ -74,13 +90,8 @@ def _generate_vendor_notification(session: ShipmentSession, vendor: Vendor) -> s
     return message
 
 
-def get_email_service(db: Session = Depends(get_db)) -> EmailService:
-    """Dependency for Email service"""
-    return EmailService(db)
-
-
 # ==========================================
-# EMAIL ENDPOINTS
+# 3. EMAIL ENDPOINTS
 # ==========================================
 
 @router.post("/emails/check", response_model=dict)
@@ -112,7 +123,6 @@ async def process_emails(
     """Process new emails (Alias for check_emails)"""
     try:
         background_tasks.add_task(email_service.process_new_emails, 50)
-        
         return {
             "status": "processing",
             "message": "Email processing initiated"
@@ -123,19 +133,34 @@ async def process_emails(
 
 @router.get("/emails/", response_model=List[EmailResponse])
 async def get_emails(
+    category: Optional[str] = Query(None, description="Filter by category: all, shipping, query, spam"),
     is_shipping_request: Optional[bool] = None,
     limit: int = 20,
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
     """Get all emails with optional filters"""
-    query = db.query(Email)
+    email_service = EmailService(db)
     
-    if is_shipping_request is not None:
-        query = query.filter(Email.is_shipping_request == is_shipping_request)
+    # Use the service method with category support
+    emails = email_service.get_all_emails(
+        category=category,
+        skip=offset,
+        limit=limit
+    )
     
-    # FIX: Explicitly sort by received_at DESC (Newest First)
-    emails = query.order_by(Email.received_at.desc()).offset(offset).limit(limit).all()
+    # --- SERVER SIDE DEBUGGING LOGS ---
+    # These logs verify that the backend is correctly fetching nested data before sending it.
+    try:
+        count = 0
+        for e in emails[:10]: # Check first 10 for efficiency
+            if e.responses and len(e.responses) > 0:
+                count += 1
+                print(f"[DEBUG] Email {e.id} has {len(e.responses)} nested responses", flush=True)
+        if count > 0:
+            print(f"[DEBUG] Found {count} emails with replies in this batch", flush=True)
+    except Exception as e:
+        print(f"[DEBUG ERROR] {e}", flush=True)
     
     return emails
 
@@ -169,7 +194,7 @@ async def reply_to_email(
         raise HTTPException(status_code=404, detail="Email not found")
         
     try:
-        # Send the response using the service
+        # 1. Send the response using the service
         response = email_service.send_response_email(
             email=email,
             message=reply_data.content,
@@ -179,13 +204,33 @@ async def reply_to_email(
         if not response:
             raise HTTPException(status_code=500, detail="Failed to send email via SMTP")
             
-        return {"success": True, "messageId": response.response_message_id}
+        # 2. Force update status to 'completed'
+        email.status = "completed"
+        email.updated_at = datetime.utcnow()
+        
+        # 3. CRITICAL: Commit explicitly
+        email_service.db.commit()
+        
+        # 4. Refresh to load relationships
+        email_service.db.refresh(email)
+        
+        # 5. IMPORTANT: Return the full updated email with responses
+        from app.models.schemas import EmailResponse
+        
+        print(f"[DEBUG] Reply created. Email now has {len(email.responses)} responses", flush=True)
+        
+        return {
+            "success": True,
+            "messageId": response.response_message_id,
+            "email": EmailResponse.model_validate(email)  # Return full email
+        }
     except Exception as e:
+        email_service.db.rollback()
+        print(f"[ERROR] Failed to reply: {str(e)}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ==========================================
-# SHIPMENT / SESSION ENDPOINTS
+# 4. SHIPMENT / SESSION ENDPOINTS
 # ==========================================
 
 @router.get("/sessions/", response_model=List[ShipmentSessionResponse])
@@ -215,23 +260,45 @@ async def get_sessions(
 @router.post("/sessions/", response_model=ShipmentSessionResponse)
 async def create_session_manual(
     session_data: ShipmentSessionCreate,
-    email_service: EmailService = Depends(get_email_service)
+    email_service: EmailService = Depends(get_email_service),
+    db: Session = Depends(get_db)
 ):
     """
-    Create a shipment session manually (e.g. converting a Query email into a Shipment).
+    Create a shipment session manually (Convert Query to Shipment).
+    If a session already exists for the email, UPDATE it instead of creating a new one.
     """
-    email = email_service.get_email_by_id(session_data.email_id)
-    if not email:
-        raise HTTPException(status_code=404, detail="Original email not found")
+    # 1. Check if session already exists
+    existing_session = db.query(ShipmentSession).filter(
+        ShipmentSession.email_id == session_data.email_id
+    ).first()
 
-    # Convert Pydantic model to dict for the service
-    # We exclude email_id from the extracted_info dict
+    # Prepare data
     extracted_data = session_data.model_dump(exclude={'email_id'})
-    
-    # Calculate missing fields based on what was provided manually
     required = ['sender_name', 'package_description']
     missing = [field for field in required if not extracted_data.get(field)]
     is_complete = len(missing) == 0
+
+    if existing_session:
+        # UPDATE EXISTING
+        try:
+            # Use the service helper to update fields intelligently
+            email_service._update_existing_shipment(existing_session, {"extracted_info": extracted_data})
+            
+            # Explicitly update status if complete, as the helper focuses on fields
+            if is_complete:
+                existing_session.status = ShipmentStatus.COMPLETE
+                existing_session.completed_at = datetime.utcnow()
+                db.commit()
+                
+            db.refresh(existing_session)
+            return existing_session
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update session: {str(e)}")
+
+    # CREATE NEW
+    email = email_service.get_email_by_id(session_data.email_id)
+    if not email:
+        raise HTTPException(status_code=404, detail="Original email not found")
 
     try:
         session = email_service.create_shipment_session(
@@ -282,14 +349,13 @@ async def assign_vendor(
         
         session.vendor_id = vendor_id
         session.vendor_notified_at = datetime.utcnow()
-        # Ensure status reflects it's waiting for vendor now, if it was just incomplete
+        
+        # Update status to indicate waiting for vendor if it was just incomplete
         if session.status == ShipmentStatus.INCOMPLETE:
              session.status = ShipmentStatus.PENDING_INFO 
              
         db.commit()
         db.refresh(session)
-        
-        print(f"[VENDOR ASSIGNMENT] Session #{session_id} updated: vendor_id={session.vendor_id}, vendor_notified_at={session.vendor_notified_at}", flush=True)
         
         # Send notification email to vendor
         if vendor.email:
@@ -334,7 +400,9 @@ async def update_session_status(
     return session
 
 
-# --- Specific List Endpoints (For legacy support or specific UI needs) ---
+# ==========================================
+# 5. LEGACY / SPECIFIC LIST ENDPOINTS
+# ==========================================
 
 @router.get("/shipments", response_model=List[ShipmentSessionResponse])
 async def list_shipments(
@@ -342,9 +410,13 @@ async def list_shipments(
     limit: int = 100,
     email_service: EmailService = Depends(get_email_service)
 ):
-    """Legacy alias for /sessions/"""
+    """
+    List shipment sessions with optional status filter.
+    Legacy alias for /sessions/
+    """
     status_filter = ShipmentStatus(status.value) if status else None
     shipments = email_service.get_shipment_sessions(status=status_filter, limit=limit)
+    
     return shipments
 
 
@@ -353,10 +425,12 @@ async def get_shipment_legacy(
     shipment_id: int,
     email_service: EmailService = Depends(get_email_service)
 ):
-    """Legacy alias for /sessions/{id}"""
+    """Get shipment session by ID (Legacy alias)"""
     shipment = email_service.get_shipment_by_id(shipment_id)
+    
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
+    
     return shipment
 
 
@@ -387,7 +461,7 @@ async def list_complete_shipments(
 
 
 # ==========================================
-# VENDOR ENDPOINTS
+# 6. VENDOR ENDPOINTS
 # ==========================================
 
 @router.get("/vendors", response_model=List[VendorResponse])
@@ -432,10 +506,8 @@ async def search_vendors(
 async def get_vendor(vendor_id: int, db: Session = Depends(get_db)):
     """Get vendor by ID"""
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
-    
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
-    
     return vendor
 
 
@@ -453,7 +525,6 @@ async def create_vendor(vendor_data: VendorCreate, db: Session = Depends(get_db)
 async def update_vendor(vendor_id: int, vendor_data: VendorUpdate, db: Session = Depends(get_db)):
     """Update a vendor"""
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
-    
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
     
@@ -469,7 +540,6 @@ async def update_vendor(vendor_id: int, vendor_data: VendorUpdate, db: Session =
 async def delete_vendor(vendor_id: int, db: Session = Depends(get_db)):
     """Delete a vendor"""
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
-    
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
     
@@ -479,17 +549,14 @@ async def delete_vendor(vendor_id: int, db: Session = Depends(get_db)):
 
 
 # ==========================================
-# SYSTEM / DASHBOARD ENDPOINTS
+# 7. SYSTEM / DASHBOARD ENDPOINTS
 # ==========================================
 
 @router.get("/outlook/authenticate")
 async def authenticate_email():
-    """
-    Authenticate with email service (SMTP/IMAP)
-    """
+    """Authenticate with email service"""
     try:
         success = smtp_service.authenticate()
-        
         if success:
             return {"status": "success", "message": "Email authentication successful"}
         else:
